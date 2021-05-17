@@ -10,7 +10,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt update
-          sudo apt install build-essential libelf-dev autopoint libdebuginfod
+          sudo apt install build-essential libelf-dev autopoint elfutils
 
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@v1
