@@ -8,14 +8,14 @@ jobs:
     runs-on: ubuntu-20.04
     steps:
       - name: Install Dependencies
-        run: sudo apt install libelf-dev autotools
-
-      - uses: actions/checkout@v2
-      - run: git clone git://sourceware.org/git/elfutils.git
+        run: sudo apt update && sudo apt install libelf-dev autoconf
 
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@v1
         with:
           version: master
+
+      - uses: actions/checkout@v2
+      - run: git clone git://sourceware.org/git/elfutils.git
       
       - run: zig build
