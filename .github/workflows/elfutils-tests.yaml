@@ -8,7 +8,9 @@ jobs:
     runs-on: ubuntu-20.04
     steps:
       - name: Install Dependencies
-        run: sudo apt update && sudo apt install libelf-dev autoconf
+        run: |
+          sudo apt update
+          sudo apt install build-essential libelf-dev
 
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@v1
@@ -19,3 +21,19 @@ jobs:
       - run: git clone git://sourceware.org/git/elfutils.git
       
       - run: zig build
+
+      - name: Configure elfutils
+        working-directory: elfutils
+        run: |
+          autoreconf -i -f
+          ./configure --enable-maintainer-mode
+
+      - name: Toss in our stuff
+        run: |
+          cp testing/libelf-Makefile elfutils/libelf/Makefile
+          cp zig-out/lib/* elfutils/libelf
+
+      - name: Build elfutils
+        working-directory: elfutils
+        run: make
+
