@@ -7,11 +7,12 @@ jobs:
   elfutils-tests:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v2
+      - run: git clone git://sourceware.org/git/elfutils.git
+
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@v1
         with:
           version: master
-
-      - uses: actions/checkout@v2
-      - run: git clone git://sourceware.org/git/elfutils.git
       
+      - run: zig build
