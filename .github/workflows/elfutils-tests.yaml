@@ -36,4 +36,8 @@ jobs:
       - name: Build elfutils
         working-directory: elfutils
         run: make
-
+      
+      - name: Test elfutils
+        working-directory: elfutils
+        continue-on-error: true
+        run: make check
