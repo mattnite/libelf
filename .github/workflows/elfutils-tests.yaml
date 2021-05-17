@@ -40,7 +40,13 @@ jobs:
       - name: Test elfutils
         working-directory: elfutils
         continue-on-error: true
+        run: make check > test-log
+
+      - name: Passed tests must be equal or greater than before
         run: |
-          make check > test-log
-          echo "TEST RESULTS:"
-          cat test-log
+          PASSED=$(cat elfutils/test-log | grep "# PASS:" | awk '{ print $3 }')
+          echo "passed:" $PASSED
+
+      - uses: EndBug/add-and-commit@v7
+        with:
+          default_author: github_actions
