@@ -1,5 +1,7 @@
 name: elfutils-tests
-on: [pull-request, workflow_dispatch]
+on:
+  workflow_dispatch:
+  pull_request:
 
 jobs:
   elfutils-tests:
