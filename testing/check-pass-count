@@ -9,6 +9,7 @@ then
         echo passed tests went from $PREV to $PASSED
         echo $PASSED > testing/passed
 elif [ $PASSED -lt $PREV ]
-        echo passed tests ($PASSED) went down from $PREV
+then
+        echo passed tests "($PASSED)" went down from $PREV
         exit 1
 fi
