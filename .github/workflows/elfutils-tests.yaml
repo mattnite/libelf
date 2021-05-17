@@ -43,17 +43,7 @@ jobs:
         run: make check | tee test-log
 
       - name: Passed tests must be equal or greater than before
-        run: |
-          PASSED=$(cat elfutils/test-log | grep "# PASS:" | awk '{ print $3 }')
-          PREV=$(cat testing/passed)
-          if [ $PASSED -gt $PREV ]
-          then
-            echo passed tests went from $PREV to $PASSED
-            echo $PASSED > testing/passed
-          elif [ $PASSED -lt $PREV ]
-            echo passed tests ($PASSED) went down from $PREV
-            exit 1
-          fi
+        run: ./testing/check-pass-count
 
       - uses: EndBug/add-and-commit@v7
         with:
