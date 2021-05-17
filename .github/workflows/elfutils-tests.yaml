@@ -1,0 +1,52 @@
+name: elfutils-tests
+on:
+  workflow_dispatch:
+  pull_request:
+
+jobs:
+  elfutils-tests:
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Install Dependencies
+        run: |
+          sudo apt update
+          sudo apt install build-essential libelf-dev autopoint libarchive-dev libmicrohttpd-dev libcurl4-openssl-dev
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v1
+        with:
+          version: master
+
+      - uses: actions/checkout@v2
+      - run: git clone --branch elfutils-0.184 git://sourceware.org/git/elfutils.git
+      
+      - run: zig build
+
+      - name: Configure elfutils
+        working-directory: elfutils
+        run: |
+          autoreconf -i -f
+          ./configure --enable-maintainer-mode --enable-libdebuginfod=dummy
+
+      - name: Toss in our stuff
+        run: |
+          cp testing/libelf-Makefile elfutils/libelf/Makefile
+          cp zig-out/lib/* elfutils/libelf
+
+      - name: Build elfutils
+        working-directory: elfutils
+        run: make
+      
+      - name: Test elfutils
+        working-directory: elfutils
+        continue-on-error: true
+        run: make check | tee test-log
+
+      - name: Passed tests must be equal or greater than before
+        run: ./testing/check-pass-count
+
+      - uses: EndBug/add-and-commit@v7
+        with:
+          default_author: github_actions
+          message: 'up passed test count'
+          add: testing/passed

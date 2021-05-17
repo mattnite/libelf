@@ -1,4 +1,5 @@
 build_runner.zig
+elfutils
 zig-cache
 zig-out
 .gyro
