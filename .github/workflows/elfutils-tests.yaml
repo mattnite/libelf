@@ -18,7 +18,7 @@ jobs:
           version: master
 
       - uses: actions/checkout@v2
-      - run: git clone git://sourceware.org/git/elfutils.git
+      - run: git clone --branch elfutils-0.184 git://sourceware.org/git/elfutils.git
       
       - run: zig build
 
