@@ -40,4 +40,4 @@ jobs:
       - name: Test elfutils
         working-directory: elfutils
         continue-on-error: true
-        run: make check
+        run: make check | grep PASS
