@@ -7,6 +7,9 @@ jobs:
   elfutils-tests:
     runs-on: ubuntu-20.04
     steps:
+      - name: Install Dependencies
+        run: sudo apt install libelf-dev autotools
+
       - uses: actions/checkout@v2
       - run: git clone git://sourceware.org/git/elfutils.git
 
@@ -14,8 +17,5 @@ jobs:
         uses: goto-bus-stop/setup-zig@v1
         with:
           version: master
-
-      - name: Install Dependencies
-        run: apt install libelf-dev
       
       - run: zig build
