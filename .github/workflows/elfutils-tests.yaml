@@ -1,5 +1,6 @@
 name: elfutils-tests
-on: [pull-request]
+on: [pull-request, workflow_dispatch]
+
 jobs:
   elfutils-tests:
     runs-on: ubuntu-latest
