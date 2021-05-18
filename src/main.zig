@@ -4,6 +4,81 @@ const c = @cImport({
     @cInclude("nlist.h");
 });
 
+threadlocal var global_error: c_int = 0;
+
+pub const Error = error{
+    Unknown,
+    UnknownVersion,
+    UnknownType,
+    InvalidHandle,
+    SourceSize,
+    DestSize,
+    InvalidEncoding,
+    OutOfMemory,
+    InvalidFile,
+    InvalidElf,
+    InvalidOp,
+    NoVersion,
+    InvalidCmd,
+    Range,
+    ArchiveFmag,
+    InvalidArchive,
+    NoArchive,
+    NoIndex,
+    ReadError,
+    WriteError,
+    InvalidClass,
+    InvalidIndex,
+    InvalidOperand,
+    InvalidSection,
+    InvalidCommand,
+    WrongOrderEhdr,
+    FdDisabled,
+    FdMismatch,
+    OffsetRange,
+    NotNulSection,
+    DataMismatch,
+    InvalidSectionHeader,
+    InvalidData,
+    DataEncoding,
+    SectionTooSmall,
+    InvalidAlign,
+    InvalidShentsize,
+    UpdateRo,
+    Nofile,
+    GroupNotRel,
+    InvalidPhdr,
+    NoPhdr,
+    InvalidOffset,
+    InvalidSectionType,
+    InvalidSectionFlags,
+    NotCompressed,
+    AlreadyCompressed,
+    UnknownCompressionType,
+    CompressError,
+    DecompressError,
+
+    // remove later
+    Todo,
+};
+
+fn seterrno(err: Error) void {
+    global_error = @errorToInt(err);
+}
+
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+const allocator = &gpa.allocator;
+
+const Elf = struct {
+    const Self = @This();
+
+    fd: c_int,
+
+    fn fromSlice(slice: []u8) Error!*Self {
+        return error.Todo;
+    }
+};
+
 export fn elf32_checksum(elf: ?*c.Elf) c_long {
     return -1;
 }
@@ -97,9 +172,65 @@ export fn elf_end(elf: ?*c.Elf) c_int {
     return -1;
 }
 
-// libbpf
 export fn elf_errmsg(err: c_int) ?[*:0]const u8 {
-    return null;
+    return if (err == 0)
+        "no error"
+    else if (err > std.math.maxInt(u16))
+        "unknown error"
+    else switch (@intToError(@intCast(u16, err))) {
+        error.Unknown => "unknown error",
+        error.UnknownVersion => "unknown version",
+        error.UnknownType => "unknown type",
+        error.InvalidHandle => "invalid `Elf' handle",
+        error.SourceSize => "invalid size of source operand",
+        error.DestSize => "invalid size of destination operand",
+        error.InvalidEncoding => "invalid encoding",
+        error.OutOfMemory => "out of memory",
+        error.InvalidFile => "invalid file descriptor",
+        error.InvalidElf => "invalid ELF file data",
+        error.InvalidOp => "invalid operation",
+        error.NoVersion => "ELF version not set",
+        error.InvalidCmd => "invalid command",
+        error.Range => "offset out of range",
+        error.ArchiveFmag => "invalid fmag field in archive header",
+        error.InvalidArchive => "invalid archive file",
+        error.NoArchive => "descriptor is not for an archive",
+        error.NoIndex => "no index available",
+        error.ReadError => "cannot read data from file",
+        error.WriteError => "cannot write data to file",
+        error.InvalidClass => "invalid binary class",
+        error.InvalidIndex => "invalid section index",
+        error.InvalidOperand => "invalid operand",
+        error.InvalidSection => "invalid section",
+        error.InvalidCommand => "invalid command",
+        error.WrongOrderEhdr => "executable header not created first",
+        error.FdDisabled => "file descriptor disabled",
+        error.FdMismatch => "archive/member file descriptor mismatch",
+        error.OffsetRange => "offset out of range",
+        error.NotNulSection => "cannot manipulate null section",
+        error.DataMismatch => "data/scn mismatch",
+        error.InvalidSectionHeader => "invalid section header",
+        error.InvalidData => "invalid data",
+        error.DataEncoding => "unknown data encoding",
+        error.SectionTooSmall => "section `sh_size' too small for data",
+        error.InvalidAlign => "invalid section alignment",
+        error.InvalidShentsize => "invalid section entry size",
+        error.UpdateRo => "update() for write on read-only file",
+        error.Nofile => "no such file",
+        error.GroupNotRel => "only relocatable files can contain section groups",
+        error.InvalidPhdr => "program header only allowed in executables, shared objects, and core files",
+        error.NoPhdr => "file has no program header",
+        error.InvalidOffset => "invalid offset",
+        error.InvalidSectionType => "invalid section type",
+        error.InvalidSectionFlags => "invalid section flags",
+        error.NotCompressed => "section does not contain compressed data",
+        error.AlreadyCompressed => "section contains compressed data",
+        error.UnknownCompressionType => "unknown compression type",
+        error.CompressError => "cannot compress data",
+        error.DecompressError => "cannot decompress data",
+        error.Todo => "got a todo error, this is for development only",
+        else => "unknown error",
+    };
 }
 
 export fn elf_errno() c_int {
@@ -176,9 +307,21 @@ export fn elf_kind(elf: ?*c.Elf) c.Elf_Kind {
     return .ELF_K_NONE;
 }
 
-// libbpf
-export fn elf_memory(image: [*]u8, size: usize) ?*c.Elf {
-    return null;
+export fn elf_memory(image: ?[*]u8, size: usize) ?*c.Elf {
+    const slice = if (image) |img| blk: {
+        var s: []u8 = undefined;
+        s.ptr = img;
+        s.len = size;
+        break :blk s;
+    } else {
+        seterrno(error.InvalidOperand);
+        return null;
+    };
+
+    return @ptrCast(*c.Elf, Elf.fromSlice(slice) catch |e| {
+        seterrno(e);
+        return null;
+    });
 }
 
 // libbpf
