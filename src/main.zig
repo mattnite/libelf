@@ -5,6 +5,7 @@ const c = @cImport({
 });
 
 threadlocal var global_error: c_int = 0;
+var global_version: c_uint = c.EV_NONE;
 
 pub const Error = error{
     Unknown,
@@ -69,13 +70,62 @@ fn seterrno(err: Error) void {
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 const allocator = &gpa.allocator;
 
+const Ident = extern struct {};
+
 const Elf = struct {
-    const Self = @This();
+    memory: union(enum) {
+        referenced: []u8,
+        owned: []u8,
+    },
 
-    fd: c_int,
+    fn begin(fd: c_int, cmd: c.Elf_Cmd, ref: ?*Elf) Error!?*Elf {
+        if (global_version != c.EV_CURRENT)
+            return error.NoVersion;
 
-    fn fromSlice(slice: []u8) Error!*Self {
-        return error.Todo;
+        if (ref) |r| {
+            // TODO: r.rwlock();
+        } else {
+            _ = std.os.fcntl(fd, std.c.F_GETFD, 0) catch {
+                return error.InvalidFile;
+            };
+        }
+        // TODO: defer if (ref) |r| r.unlock();
+
+        return switch (cmd) {
+            .ELF_C_NULL => null,
+            .ELF_C_READ, .ELF_C_READ_MMAP => blk: {
+                var ret = try allocator.create(Elf);
+                errdefer allocator.destroy(ret);
+
+                const file = std.fs.File{ .handle = fd };
+                ret.* = Elf{
+                    .memory = .{
+                        .owned = file.reader().readAllAlloc(allocator, std.math.maxInt(usize)) catch |e| {
+                            return error.InvalidFile;
+                        },
+                    },
+                };
+
+                break :blk ret;
+            },
+            .ELF_C_WRITE => error.Todo,
+            else => error.Todo,
+        };
+    }
+
+    fn end(self: *Elf) void {
+        switch (self.memory) {
+            .owned => |mem| allocator.free(mem),
+            .referenced => {},
+        }
+
+        allocator.destroy(self);
+    }
+
+    fn fromSlice(slice: []u8) Error!*Elf {
+        var ret = try allocator.create(Elf);
+        ret.* = Elf{ .memory = .{ .referenced = slice } };
+        return ret;
     }
 };
 
@@ -156,7 +206,10 @@ export fn elf64_xlatetom(dest: ?*c.Elf_Data, src: ?*const c.Elf_Data, encode: c_
 
 // libbpf
 export fn elf_begin(fd: c_int, cmd: c.Elf_Cmd, ref: ?*c.Elf) ?*c.Elf {
-    return null;
+    return @ptrCast(*c.Elf, Elf.begin(fd, cmd, @ptrCast(*Elf, @alignCast(@alignOf(*Elf), ref))) catch |e| {
+        seterrno(e);
+        return null;
+    });
 }
 
 export fn elf_clone(elf: ?*c.Elf, cmd: c.Elf_Cmd) ?*c.Elf {
@@ -169,7 +222,10 @@ export fn elf_cntl(elf: ?*c.Elf, cmd: c.Elf_Cmd) c_int {
 
 // libbpf
 export fn elf_end(elf: ?*c.Elf) c_int {
-    return -1;
+    return if (elf) |e| blk: {
+        @ptrCast(*Elf, @alignCast(@alignOf(*Elf), e)).end();
+        break :blk 0;
+    } else 0;
 }
 
 export fn elf_errmsg(err: c_int) ?[*:0]const u8 {
@@ -339,7 +395,6 @@ export fn elf_newscn(elf: ?*c.Elf) ?*c.Elf_Scn {
     return null;
 }
 
-// libbpf
 export fn elf_next(elf: ?*c.Elf) c.Elf_Cmd {
     return .ELF_C_NULL;
 }
@@ -372,9 +427,16 @@ export fn elf_update(elf: ?*c.Elf, cmd: c.Elf_Cmd) i64 {
     return -1;
 }
 
-// libbpf
 export fn elf_version(version: c_uint) c_uint {
-    return 0;
+    return if (version == @as(c_uint, c.EV_NONE))
+        c.EV_CURRENT
+    else if (version == @as(c_uint, c.EV_CURRENT)) blk: {
+        global_version = @as(c_uint, c.EV_CURRENT);
+        break :blk @as(c_uint, c.EV_CURRENT);
+    } else blk: {
+        seterrno(error.UnknownVersion);
+        break :blk @as(c_uint, c.EV_NONE);
+    };
 }
 
 export fn gelf_checksum(elf: ?*c.Elf) c_long {
