@@ -153,7 +153,10 @@ export fn elf32_fsize(elf_type: c.Elf_Type, count: usize, version: c_uint) usize
 }
 
 export fn elf32_getehdr(elf: ?*c.Elf) ?*c.Elf32_Ehdr {
-    return null;
+    return if (elf) |e|
+        Elf.cast(e).getehdr(c.Elf32_Ehdr)
+    else
+        null;
 }
 
 export fn elf32_getphdr(elf: ?*c.Elf) ?*c.Elf32_Phdr {
@@ -473,7 +476,11 @@ export fn gelf_getdyn(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Dyn) ?*c.GEl
 
 // libbpf
 export fn gelf_getehdr(elf: ?*c.Elf, dst: ?*c.GElf_Ehdr) ?*c.GElf_Ehdr {
-    return null;
+    if (elf == null or dst == null)
+        return null;
+
+    dst.?.* = Elf.cast(elf.?).getehdr(c.GElf_Ehdr).*;
+    return dst.?;
 }
 
 export fn gelf_getmove(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Move) ?*c.GElf_Move {
