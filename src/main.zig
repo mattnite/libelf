@@ -78,6 +78,10 @@ const Elf = struct {
         owned: []u8,
     },
 
+    fn cast(elf: *c.Elf) *Elf {
+        return @ptrCast(*Elf, @alignCast(@alignOf(*Elf), elf));
+    }
+
     fn begin(fd: c_int, cmd: c.Elf_Cmd, ref: ?*Elf) Error!?*Elf {
         if (global_version != c.EV_CURRENT)
             return error.NoVersion;
@@ -127,6 +131,17 @@ const Elf = struct {
         ret.* = Elf{ .memory = .{ .referenced = slice } };
         return ret;
     }
+
+    fn getMemory(self: *Elf) []u8 {
+        return switch (self.memory) {
+            .owned => |mem| mem,
+            .referenced => |mem| mem,
+        };
+    }
+
+    fn getehdr(self: *Elf, comptime T: type) *T {
+        return @ptrCast(*T, @alignCast(@alignOf(*T), self.getMemory().ptr));
+    }
 };
 
 export fn elf32_checksum(elf: ?*c.Elf) c_long {
@@ -138,7 +153,10 @@ export fn elf32_fsize(elf_type: c.Elf_Type, count: usize, version: c_uint) usize
 }
 
 export fn elf32_getehdr(elf: ?*c.Elf) ?*c.Elf32_Ehdr {
-    return null;
+    return if (elf) |e|
+        Elf.cast(e).getehdr(c.Elf32_Ehdr)
+    else
+        null;
 }
 
 export fn elf32_getphdr(elf: ?*c.Elf) ?*c.Elf32_Phdr {
@@ -173,9 +191,11 @@ export fn elf64_fsize(elf_type: c.Elf_Type, count: usize, version: c_uint) usize
     return 0;
 }
 
-// libbpf
 export fn elf64_getehdr(elf: ?*c.Elf) ?*c.Elf64_Ehdr {
-    return null;
+    return if (elf) |e|
+        Elf.cast(e).getehdr(c.Elf64_Ehdr)
+    else
+        null;
 }
 
 export fn elf64_getphdr(elf: ?*c.Elf) ?*c.Elf64_Phdr {
@@ -204,9 +224,8 @@ export fn elf64_xlatetom(dest: ?*c.Elf_Data, src: ?*const c.Elf_Data, encode: c_
     return null;
 }
 
-// libbpf
 export fn elf_begin(fd: c_int, cmd: c.Elf_Cmd, ref: ?*c.Elf) ?*c.Elf {
-    return @ptrCast(*c.Elf, Elf.begin(fd, cmd, @ptrCast(*Elf, @alignCast(@alignOf(*Elf), ref))) catch |e| {
+    return @ptrCast(*c.Elf, Elf.begin(fd, cmd, if (ref) |r| Elf.cast(r) else null) catch |e| {
         seterrno(e);
         return null;
     });
@@ -220,10 +239,9 @@ export fn elf_cntl(elf: ?*c.Elf, cmd: c.Elf_Cmd) c_int {
     return -1;
 }
 
-// libbpf
 export fn elf_end(elf: ?*c.Elf) c_int {
     return if (elf) |e| blk: {
-        @ptrCast(*Elf, @alignCast(@alignOf(*Elf), e)).end();
+        @ptrCast(*Elf, Elf.cast(e)).end();
         break :blk 0;
     } else 0;
 }
@@ -456,9 +474,12 @@ export fn gelf_getdyn(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Dyn) ?*c.GEl
     return null;
 }
 
-// libbpf
 export fn gelf_getehdr(elf: ?*c.Elf, dst: ?*c.GElf_Ehdr) ?*c.GElf_Ehdr {
-    return null;
+    if (elf == null or dst == null)
+        return null;
+
+    dst.?.* = Elf.cast(elf.?).getehdr(c.GElf_Ehdr).*;
+    return dst.?;
 }
 
 export fn gelf_getmove(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Move) ?*c.GElf_Move {
