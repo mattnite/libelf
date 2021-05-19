@@ -474,7 +474,6 @@ export fn gelf_getdyn(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Dyn) ?*c.GEl
     return null;
 }
 
-// libbpf
 export fn gelf_getehdr(elf: ?*c.Elf, dst: ?*c.GElf_Ehdr) ?*c.GElf_Ehdr {
     if (elf == null or dst == null)
         return null;
