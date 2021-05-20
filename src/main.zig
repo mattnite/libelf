@@ -94,7 +94,7 @@ const Scn = struct {
         self.data.deinit();
     }
 
-    fn cast(scn: *c.Elf_Scn) *Elf {
+    fn cast(scn: *c.Elf_Scn) *Scn {
         return @ptrCast(*Scn, @alignCast(@alignOf(*Scn), scn));
     }
 };
