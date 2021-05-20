@@ -4,6 +4,8 @@ const c = @cImport({
     @cInclude("nlist.h");
 });
 
+const Allocator = std.mem.Allocator;
+
 threadlocal var global_error: c_int = 0;
 var global_version: c_uint = c.EV_NONE;
 
@@ -70,16 +72,81 @@ fn seterrno(err: Error) void {
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 const allocator = &gpa.allocator;
 
-const Ident = extern struct {};
+const Scn = struct {
+    elf: *Elf,
+    data: std.ArrayList(c.Elf_Data),
+    index: usize,
+
+    state: union(enum) {
+        elf32: struct {
+            shdr: *c.Elf32_Shdr,
+        },
+        elf64: struct {
+            shdr: *c.Elf64_Shdr,
+        },
+    },
+
+    fn init(shdr: anytype, index: usize) !Scn {
+        return error.Todo;
+    }
+
+    fn deinit(self: *Scn) void {
+        self.data.deinit();
+    }
+
+    fn cast(scn: *c.Elf_Scn) *Elf {
+        return @ptrCast(*Scn, @alignCast(@alignOf(*Scn), scn));
+    }
+};
+
+const Memory = union(enum) {
+    referenced: []u8,
+    owned: []u8,
+
+    fn get(self: Memory) []u8 {
+        return switch (self) {
+            .owned => |mem| mem,
+            .referenced => |mem| mem,
+        };
+    }
+};
 
 const Elf = struct {
-    memory: union(enum) {
-        referenced: []u8,
-        owned: []u8,
+    state: union(enum) {
+        elf32: struct {
+            ehdr: *c.Elf32_Ehdr,
+            shdr: *c.Elf32_Shdr,
+        },
+        elf64: struct {
+            ehdr: *c.Elf64_Ehdr,
+            shdr: *c.Elf64_Shdr,
+        },
+
+        const Self = @This();
+
+        fn shstrndx(self: Self) usize {
+            return switch (self) {
+                .elf32 => |elf| elf.ehdr.e_shstrndx,
+                .elf64 => |elf| elf.ehdr.e_shstrndx,
+            };
+        }
+
+        fn shnum(self: Self) usize {
+            return switch (self) {
+                .elf32 => |elf| elf.ehdr.e_shnum,
+                .elf64 => |elf| elf.ehdr.e_shnum,
+            };
+        }
     },
+    memory: Memory,
+    sections: std.ArrayList(Scn),
 
     fn cast(elf: *c.Elf) *Elf {
         return @ptrCast(*Elf, @alignCast(@alignOf(*Elf), elf));
+    }
+
+    fn is_64(elf: *Elf) bool {
+        return elf.state.elf64.ehdr.e_ident[c.EI_CLASS] == c.ELFCLASS64;
     }
 
     fn begin(fd: c_int, cmd: c.Elf_Cmd, ref: ?*Elf) Error!?*Elf {
@@ -98,19 +165,12 @@ const Elf = struct {
         return switch (cmd) {
             .ELF_C_NULL => null,
             .ELF_C_READ, .ELF_C_READ_MMAP => blk: {
-                var ret = try allocator.create(Elf);
-                errdefer allocator.destroy(ret);
-
                 const file = std.fs.File{ .handle = fd };
-                ret.* = Elf{
-                    .memory = .{
-                        .owned = file.reader().readAllAlloc(allocator, std.math.maxInt(usize)) catch |e| {
-                            return error.InvalidFile;
-                        },
+                break :blk fromMemory(.{
+                    .owned = file.reader().readAllAlloc(allocator, std.math.maxInt(usize)) catch |e| {
+                        return error.InvalidFile;
                     },
-                };
-
-                break :blk ret;
+                });
             },
             .ELF_C_WRITE => error.Todo,
             else => error.Todo,
@@ -118,6 +178,9 @@ const Elf = struct {
     }
 
     fn end(self: *Elf) void {
+        for (self.sections.items) |*scn| scn.deinit();
+        self.sections.deinit();
+
         switch (self.memory) {
             .owned => |mem| allocator.free(mem),
             .referenced => {},
@@ -126,21 +189,42 @@ const Elf = struct {
         allocator.destroy(self);
     }
 
-    fn fromSlice(slice: []u8) Error!*Elf {
+    fn fromMemory(memory: Memory) Error!*Elf {
+        const ehdr = @ptrCast(*c.GElf_Ehdr, @alignCast(@alignOf(*c.GElf_Ehdr), memory.get().ptr));
+        const shdr = @ptrCast(*c.GElf_Shdr, @alignCast(@alignOf(*c.GElf_Shdr), memory.get()[ehdr.e_shoff..].ptr));
         var ret = try allocator.create(Elf);
-        ret.* = Elf{ .memory = .{ .referenced = slice } };
+        ret.* = Elf{
+            .state = switch (ehdr.e_ident[c.EI_CLASS]) {
+                c.ELFCLASS32 => .{
+                    .elf32 = .{
+                        .ehdr = @ptrCast(*c.Elf32_Ehdr, ehdr),
+                        .shdr = @ptrCast(*c.Elf32_Shdr, shdr),
+                    },
+                },
+                c.ELFCLASS64 => .{
+                    .elf64 = .{
+                        .ehdr = @ptrCast(*c.Elf64_Ehdr, ehdr),
+                        .shdr = @ptrCast(*c.Elf64_Shdr, shdr),
+                    },
+                },
+                else => return error.InvalidElf,
+            },
+            .memory = memory,
+            .sections = std.ArrayList(Scn).init(allocator),
+        };
+
+        // parse sections
+        var i: usize = 0;
+        if (ret.is_64()) while (i < ret.state.shnum()) : (i += 1)
+            try ret.sections.append(try Scn.init(ret.state.elf64.shdr, i))
+        else while (i < ret.state.shnum()) : (i += 1)
+            try ret.sections.append(try Scn.init(ret.state.elf32.shdr, i));
+
         return ret;
     }
 
-    fn getMemory(self: *Elf) []u8 {
-        return switch (self.memory) {
-            .owned => |mem| mem,
-            .referenced => |mem| mem,
-        };
-    }
-
     fn getehdr(self: *Elf, comptime T: type) *T {
-        return @ptrCast(*T, @alignCast(@alignOf(*T), self.getMemory().ptr));
+        return @ptrCast(*T, @alignCast(@alignOf(*T), self.memory.get().ptr));
     }
 };
 
@@ -164,7 +248,7 @@ export fn elf32_getphdr(elf: ?*c.Elf) ?*c.Elf32_Phdr {
 }
 
 export fn elf32_getshdr(scn: ?*c.Elf_Scn) ?*c.Elf32_Shdr {
-    return null;
+    return if (scn) |s| Scn.cast(s).state.elf32.shdr else null;
 }
 
 export fn elf32_newehdr(elf: ?*c.Elf) ?*c.Elf32_Ehdr {
@@ -202,9 +286,8 @@ export fn elf64_getphdr(elf: ?*c.Elf) ?*c.Elf64_Phdr {
     return null;
 }
 
-// libbpf
 export fn elf64_getshdr(scn: ?*c.Elf_Scn) ?*c.Elf64_Shdr {
-    return null;
+    return if (scn) |s| Scn.cast(s).state.elf64.shdr else null;
 }
 
 // libbpf
@@ -358,7 +441,7 @@ export fn elf_getident(elf: ?*c.Elf, nbytes: ?*usize) ?[*]u8 {
     return null;
 }
 
-// libbpf
+// TODO
 export fn elf_getscn(elf: ?*c.Elf, index: usize) ?*c.Elf_Scn {
     return null;
 }
@@ -392,13 +475,13 @@ export fn elf_memory(image: ?[*]u8, size: usize) ?*c.Elf {
         return null;
     };
 
-    return @ptrCast(*c.Elf, Elf.fromSlice(slice) catch |e| {
+    return @ptrCast(*c.Elf, Elf.fromMemory(.{ .referenced = slice }) catch |e| {
         seterrno(e);
         return null;
     });
 }
 
-// libbpf
+// TODO
 export fn elf_ndxscn(scn: ?*c.Elf_Scn) usize {
     return 0;
 }
@@ -408,7 +491,7 @@ export fn elf_newdata(scn: ?*c.Elf_Scn) ?*c.Elf_Data {
     return null;
 }
 
-// libbpf
+// TODO
 export fn elf_newscn(elf: ?*c.Elf) ?*c.Elf_Scn {
     return null;
 }
@@ -417,7 +500,7 @@ export fn elf_next(elf: ?*c.Elf) c.Elf_Cmd {
     return .ELF_C_NULL;
 }
 
-// libbpf
+// TODO
 export fn elf_nextscn(elf: ?*c.Elf, scn: ?*c.Elf_Scn) ?*c.Elf_Scn {
     return null;
 }
@@ -499,7 +582,7 @@ export fn gelf_getrela(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Rela) ?*c.G
     return null;
 }
 
-// libbpf
+// TODO
 export fn gelf_getshdr(scn: ?*c.Elf_Scn, dst: ?*c.GElf_Shdr) ?*c.GElf_Shdr {
     return null;
 }
@@ -665,13 +748,20 @@ export fn elf_scnshndx(__scn: ?*c.Elf_Scn) c_int {
     return -1;
 }
 
-export fn elf_getshdrnum(__elf: ?*c.Elf, __dst: [*c]usize) c_int {
-    return -1;
+export fn elf_getshdrnum(elf: ?*c.Elf, dst: ?*usize) c_int {
+    if (elf == null or dst == null)
+        return -1;
+
+    dst.?.* = Elf.cast(elf.?).state.shnum();
+    return 0;
 }
 
-// libbpf
-export fn elf_getshdrstrndx(__elf: ?*c.Elf, __dst: [*c]usize) c_int {
-    return -1;
+export fn elf_getshdrstrndx(elf: ?*c.Elf, dst: ?*usize) c_int {
+    if (elf == null or dst == null)
+        return -1;
+
+    dst.?.* = Elf.cast(elf.?).state.shstrndx();
+    return 0;
 }
 
 export fn elf_getphdrnum(__elf: ?*c.Elf, __dst: [*c]usize) c_int {
