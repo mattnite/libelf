@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const c = @cImport({
     @cInclude("gelf.h");
     @cInclude("nlist.h");
@@ -112,6 +113,7 @@ const Memory = union(enum) {
 };
 
 const Elf = struct {
+    kind: c.Elf_Kind,
     state: union(enum) {
         elf32: struct {
             ehdr: *c.Elf32_Ehdr,
@@ -147,6 +149,19 @@ const Elf = struct {
 
     fn is_64(elf: *Elf) bool {
         return elf.state.elf64.ehdr.e_ident[c.EI_CLASS] == c.ELFCLASS64;
+    }
+
+    fn is_32(elf: *Elf) bool {
+        return elf.state.elf64.ehdr.e_ident[c.EI_CLASS] == c.ELFCLASS32;
+    }
+
+    fn validEndianness(elf: *Elf) bool {
+        return switch (elf.state.elf64.ehdr.e_ident[c.EI_DATA]) {
+            c.ELFDATA2LSB => builtin.target.cpu.arch.endian() == .Little,
+            c.ELFDATA2MSB => builtin.target.cpu.arch.endian() == .Big,
+            // TODO: handle this?
+            else => unreachable,
+        };
     }
 
     fn begin(fd: c_int, cmd: c.Elf_Cmd, ref: ?*Elf) Error!?*Elf {
@@ -194,6 +209,7 @@ const Elf = struct {
         const shdr = @ptrCast(*c.GElf_Shdr, @alignCast(@alignOf(*c.GElf_Shdr), memory.get()[ehdr.e_shoff..].ptr));
         var ret = try allocator.create(Elf);
         ret.* = Elf{
+            .kind = .ELF_K_ELF,
             .state = switch (ehdr.e_ident[c.EI_CLASS]) {
                 c.ELFCLASS32 => .{
                     .elf32 = .{
@@ -237,6 +253,16 @@ export fn elf32_fsize(elf_type: c.Elf_Type, count: usize, version: c_uint) usize
 }
 
 export fn elf32_getehdr(elf: ?*c.Elf) ?*c.Elf32_Ehdr {
+    const e = Elf.cast(elf orelse return null);
+
+    if (e.kind != .ELF_K_ELF) {
+        seterrno(error.InvalidHandle);
+        return null;
+    } else if (e.is_64() or !e.validEndianness()) {
+        seterrno(error.InvalidClass);
+        return null;
+    }
+
     return Elf.cast(elf orelse return null).getehdr(c.Elf32_Ehdr);
 }
 
@@ -273,6 +299,16 @@ export fn elf64_fsize(elf_type: c.Elf_Type, count: usize, version: c_uint) usize
 }
 
 export fn elf64_getehdr(elf: ?*c.Elf) ?*c.Elf64_Ehdr {
+    const e = Elf.cast(elf orelse return null);
+
+    if (e.kind != .ELF_K_ELF) {
+        seterrno(error.InvalidHandle);
+        return null;
+    } else if (!e.is_64() or !e.validEndianness()) {
+        seterrno(error.InvalidClass);
+        return null;
+    }
+
     return Elf.cast(elf orelse return null).getehdr(c.Elf64_Ehdr);
 }
 
@@ -561,7 +597,33 @@ export fn gelf_getehdr(elf: ?*c.Elf, dst: ?*c.GElf_Ehdr) ?*c.GElf_Ehdr {
     if (elf == null or dst == null)
         return null;
 
-    dst.?.* = Elf.cast(elf.?).getehdr(c.GElf_Ehdr).*;
+    const e = Elf.cast(elf.?);
+    if (e.kind != .ELF_K_ELF) {
+        seterrno(error.InvalidHandle);
+        return null;
+    }
+
+    // TODO: check for uncreated ehdr
+
+    if (e.is_32()) {
+        const ehdr = e.getehdr(c.Elf32_Ehdr);
+        dst.?.e_type = ehdr.e_type;
+        dst.?.e_machine = ehdr.e_machine;
+        dst.?.e_version = ehdr.e_version;
+        dst.?.e_entry = ehdr.e_entry;
+        dst.?.e_phoff = ehdr.e_phoff;
+        dst.?.e_shoff = ehdr.e_shoff;
+        dst.?.e_flags = ehdr.e_flags;
+        dst.?.e_ehsize = ehdr.e_ehsize;
+        dst.?.e_phentsize = ehdr.e_phentsize;
+        dst.?.e_phnum = ehdr.e_phnum;
+        dst.?.e_shentsize = ehdr.e_shentsize;
+        dst.?.e_shnum = ehdr.e_shnum;
+        dst.?.e_shstrndx = ehdr.e_shstrndx;
+    } else {
+        dst.?.* = e.getehdr(c.GElf_Ehdr).*;
+    }
+
     return dst.?;
 }
 
