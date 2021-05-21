@@ -237,10 +237,7 @@ export fn elf32_fsize(elf_type: c.Elf_Type, count: usize, version: c_uint) usize
 }
 
 export fn elf32_getehdr(elf: ?*c.Elf) ?*c.Elf32_Ehdr {
-    return if (elf) |e|
-        Elf.cast(e).getehdr(c.Elf32_Ehdr)
-    else
-        null;
+    return Elf.cast(elf orelse return null).getehdr(c.Elf32_Ehdr);
 }
 
 export fn elf32_getphdr(elf: ?*c.Elf) ?*c.Elf32_Phdr {
@@ -276,10 +273,7 @@ export fn elf64_fsize(elf_type: c.Elf_Type, count: usize, version: c_uint) usize
 }
 
 export fn elf64_getehdr(elf: ?*c.Elf) ?*c.Elf64_Ehdr {
-    return if (elf) |e|
-        Elf.cast(e).getehdr(c.Elf64_Ehdr)
-    else
-        null;
+    return Elf.cast(elf orelse return null).getehdr(c.Elf64_Ehdr);
 }
 
 export fn elf64_getphdr(elf: ?*c.Elf) ?*c.Elf64_Phdr {
@@ -441,9 +435,12 @@ export fn elf_getident(elf: ?*c.Elf, nbytes: ?*usize) ?[*]u8 {
     return null;
 }
 
-// TODO
 export fn elf_getscn(elf: ?*c.Elf, index: usize) ?*c.Elf_Scn {
-    return null;
+    const e = Elf.cast(elf orelse return null);
+    return if (index < e.sections.items.len)
+        @ptrCast(*c.Elf_Scn, &e.sections.items[index])
+    else
+        null;
 }
 
 /// deprecated
@@ -481,9 +478,8 @@ export fn elf_memory(image: ?[*]u8, size: usize) ?*c.Elf {
     });
 }
 
-// TODO
 export fn elf_ndxscn(scn: ?*c.Elf_Scn) usize {
-    return 0;
+    return Scn.cast(scn orelse return c.SHN_UNDEF).index;
 }
 
 // libbpf
@@ -500,9 +496,13 @@ export fn elf_next(elf: ?*c.Elf) c.Elf_Cmd {
     return .ELF_C_NULL;
 }
 
-// TODO
 export fn elf_nextscn(elf: ?*c.Elf, scn: ?*c.Elf_Scn) ?*c.Elf_Scn {
-    return null;
+    const e = Elf.cast(elf orelse return null);
+    const s = Scn.cast(scn orelse return null);
+    return if (s.index + 1 < e.sections.items.len)
+        @ptrCast(*c.Elf_Scn, &e.sections.items[s.index + 1])
+    else
+        null;
 }
 
 export fn elf_rand(elf: ?*c.Elf, offset: usize) usize {
