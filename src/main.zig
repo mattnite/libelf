@@ -89,6 +89,7 @@ const Scn = struct {
     };
 
     fn init(elf: *Elf, state: State, index: usize) !Scn {
+        std.log.debug("scn: {}", .{state});
         return Scn{
             .elf = elf,
             .state = state,
@@ -161,12 +162,11 @@ const Elf = struct {
         return elf.state.elf64.ehdr.e_ident[c.EI_CLASS] == c.ELFCLASS32;
     }
 
-    fn validEndianness(elf: *Elf) bool {
+    fn validEndianness(elf: *Elf) !bool {
         return switch (elf.state.elf64.ehdr.e_ident[c.EI_DATA]) {
             c.ELFDATA2LSB => builtin.target.cpu.arch.endian() == .Little,
             c.ELFDATA2MSB => builtin.target.cpu.arch.endian() == .Big,
-            // TODO: handle this?
-            else => unreachable,
+            else => error.InvalidData,
         };
     }
 
@@ -212,6 +212,8 @@ const Elf = struct {
 
     fn fromMemory(memory: Memory) Error!*Elf {
         const ehdr = @ptrCast(*c.GElf_Ehdr, @alignCast(@alignOf(*c.GElf_Ehdr), memory.get().ptr));
+        std.log.debug("ehdr: {}", .{ehdr});
+
         const shdr = @ptrCast(*c.GElf_Shdr, @alignCast(@alignOf(*c.GElf_Shdr), memory.get()[ehdr.e_shoff..].ptr));
         var ret = try allocator.create(Elf);
         ret.* = Elf{
@@ -276,7 +278,10 @@ export fn elf32_getehdr(elf: ?*c.Elf) ?*c.Elf32_Ehdr {
     if (e.kind != .ELF_K_ELF) {
         seterrno(error.InvalidHandle);
         return null;
-    } else if (e.is_64() or !e.validEndianness()) {
+    } else if (e.is_64() or !(e.validEndianness() catch |err| {
+        seterrno(err);
+        return null;
+    })) {
         seterrno(error.InvalidClass);
         return null;
     }
@@ -322,7 +327,10 @@ export fn elf64_getehdr(elf: ?*c.Elf) ?*c.Elf64_Ehdr {
     if (e.kind != .ELF_K_ELF) {
         seterrno(error.InvalidHandle);
         return null;
-    } else if (!e.is_64() or !e.validEndianness()) {
+    } else if (!e.is_64() or !(e.validEndianness() catch |err| {
+        seterrno(err);
+        return null;
+    })) {
         seterrno(error.InvalidClass);
         return null;
     }
