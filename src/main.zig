@@ -76,7 +76,7 @@ const allocator = &gpa.allocator;
 const Scn = struct {
     elf: *Elf,
     state: State,
-    data: std.ArrayList(c.Elf_Data),
+    data: c.Elf_Data,
     index: usize,
 
     const State = union(enum) {
@@ -89,18 +89,33 @@ const Scn = struct {
     };
 
     fn init(elf: *Elf, state: State, index: usize) !Scn {
-        std.log.debug("scn: {}", .{state});
+        //std.log.debug("scn: {}", .{state});
         return Scn{
             .elf = elf,
             .state = state,
             .index = index,
-            .data = std.ArrayList(c.Elf_Data).init(allocator),
+            .data = switch (state) {
+                .elf32 => |e| c.Elf_Data{
+                    .d_buf = @intToPtr(?*c_void, @ptrToInt(elf.memory.get().ptr) + e.shdr.sh_offset),
+                    .d_type = @intToEnum(c.Elf_Type, @intCast(c_int, e.shdr.sh_type)),
+                    .d_version = global_version,
+                    .d_size = e.shdr.sh_size,
+                    .d_off = e.shdr.sh_offset,
+                    .d_align = e.shdr.sh_addralign,
+                },
+                .elf64 => |e| c.Elf_Data{
+                    .d_buf = @intToPtr(?*c_void, @ptrToInt(elf.memory.get().ptr) + e.shdr.sh_offset),
+                    .d_type = @intToEnum(c.Elf_Type, @intCast(c_int, e.shdr.sh_type)),
+                    .d_version = global_version,
+                    .d_size = e.shdr.sh_size,
+                    .d_off = @intCast(i64, e.shdr.sh_offset),
+                    .d_align = e.shdr.sh_addralign,
+                },
+            },
         };
     }
 
-    fn deinit(self: *Scn) void {
-        self.data.deinit();
-    }
+    fn deinit(self: *Scn) void {}
 
     fn cast(scn: *c.Elf_Scn) *Scn {
         return @ptrCast(*Scn, @alignCast(@alignOf(*Scn), scn));
@@ -212,7 +227,7 @@ const Elf = struct {
 
     fn fromMemory(memory: Memory) Error!*Elf {
         const ehdr = @ptrCast(*c.GElf_Ehdr, @alignCast(@alignOf(*c.GElf_Ehdr), memory.get().ptr));
-        std.log.debug("ehdr: {}", .{ehdr});
+        //std.log.info("ehdr: {}", .{ehdr});
 
         const shdr = @ptrCast(*c.GElf_Shdr, @alignCast(@alignOf(*c.GElf_Shdr), memory.get()[ehdr.e_shoff..].ptr));
         var ret = try allocator.create(Elf);
@@ -447,7 +462,8 @@ export fn elf_errmsg(err: c_int) ?[*:0]const u8 {
 }
 
 export fn elf_errno() c_int {
-    return -1;
+    defer global_error = 0;
+    return global_error;
 }
 
 export fn elf_fill(fill: c_int) void {}
