@@ -75,20 +75,26 @@ const allocator = &gpa.allocator;
 
 const Scn = struct {
     elf: *Elf,
+    state: State,
     data: std.ArrayList(c.Elf_Data),
     index: usize,
 
-    state: union(enum) {
+    const State = union(enum) {
         elf32: struct {
             shdr: *c.Elf32_Shdr,
         },
         elf64: struct {
             shdr: *c.Elf64_Shdr,
         },
-    },
+    };
 
-    fn init(shdr: anytype, index: usize) !Scn {
-        return error.Todo;
+    fn init(elf: *Elf, state: State, index: usize) !Scn {
+        return Scn{
+            .elf = elf,
+            .state = state,
+            .index = index,
+            .data = std.ArrayList(c.Elf_Data).init(allocator),
+        };
     }
 
     fn deinit(self: *Scn) void {
@@ -117,11 +123,11 @@ const Elf = struct {
     state: union(enum) {
         elf32: struct {
             ehdr: *c.Elf32_Ehdr,
-            shdr: *c.Elf32_Shdr,
+            section_headers: []c.Elf32_Shdr,
         },
         elf64: struct {
             ehdr: *c.Elf64_Ehdr,
-            shdr: *c.Elf64_Shdr,
+            section_headers: []c.Elf64_Shdr,
         },
 
         const Self = @This();
@@ -214,13 +220,23 @@ const Elf = struct {
                 c.ELFCLASS32 => .{
                     .elf32 = .{
                         .ehdr = @ptrCast(*c.Elf32_Ehdr, ehdr),
-                        .shdr = @ptrCast(*c.Elf32_Shdr, shdr),
+                        .section_headers = blk: {
+                            var slice: []c.Elf32_Shdr = undefined;
+                            slice.ptr = @ptrCast([*]c.Elf32_Shdr, shdr);
+                            slice.len = ehdr.e_shnum;
+                            break :blk slice;
+                        },
                     },
                 },
                 c.ELFCLASS64 => .{
                     .elf64 = .{
                         .ehdr = @ptrCast(*c.Elf64_Ehdr, ehdr),
-                        .shdr = @ptrCast(*c.Elf64_Shdr, shdr),
+                        .section_headers = blk: {
+                            var slice: []c.Elf64_Shdr = undefined;
+                            slice.ptr = @ptrCast([*]c.Elf64_Shdr, shdr);
+                            slice.len = ehdr.e_shnum;
+                            break :blk slice;
+                        },
                     },
                 },
                 else => return error.InvalidElf,
@@ -230,11 +246,13 @@ const Elf = struct {
         };
 
         // parse sections
-        var i: usize = 0;
-        if (ret.is_64()) while (i < ret.state.shnum()) : (i += 1)
-            try ret.sections.append(try Scn.init(ret.state.elf64.shdr, i))
-        else while (i < ret.state.shnum()) : (i += 1)
-            try ret.sections.append(try Scn.init(ret.state.elf32.shdr, i));
+        if (ret.is_64()) {
+            for (ret.state.elf64.section_headers) |*header, index|
+                try ret.sections.append(try Scn.init(ret, .{ .elf64 = .{ .shdr = header } }, index));
+        } else {
+            for (ret.state.elf32.section_headers) |*header, index|
+                try ret.sections.append(try Scn.init(ret, .{ .elf32 = .{ .shdr = header } }, index));
+        }
 
         return ret;
     }
@@ -494,7 +512,7 @@ export fn elf_hash(string: [*:0]const u8) c_ulong {
 }
 
 export fn elf_kind(elf: ?*c.Elf) c.Elf_Kind {
-    return .ELF_K_NONE;
+    return Elf.cast(elf orelse return .ELF_K_NONE).kind;
 }
 
 export fn elf_memory(image: ?[*]u8, size: usize) ?*c.Elf {
@@ -644,9 +662,30 @@ export fn gelf_getrela(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Rela) ?*c.G
     return null;
 }
 
-// TODO
 export fn gelf_getshdr(scn: ?*c.Elf_Scn, dst: ?*c.GElf_Shdr) ?*c.GElf_Shdr {
-    return null;
+    if (scn == null or dst == null)
+        return null;
+
+    const s = Scn.cast(scn.?);
+    switch (s.state) {
+        .elf32 => |elf| {
+            const shdr = elf.shdr;
+            dst.?.sh_type = shdr.sh_type;
+            dst.?.sh_flags = shdr.sh_flags;
+            dst.?.sh_addr = shdr.sh_addr;
+            dst.?.sh_offset = shdr.sh_offset;
+            dst.?.sh_size = shdr.sh_size;
+            dst.?.sh_link = shdr.sh_link;
+            dst.?.sh_info = shdr.sh_info;
+            dst.?.sh_addralign = shdr.sh_addralign;
+            dst.?.sh_entsize = shdr.sh_entsize;
+        },
+        .elf64 => |elf| {
+            dst.?.* = elf.shdr.*;
+        },
+    }
+
+    return dst.?;
 }
 
 // libbpf
