@@ -6,6 +6,7 @@ const c = @cImport({
 });
 
 const Allocator = std.mem.Allocator;
+const SectionList = std.TailQueue(Scn);
 
 threadlocal var global_error: c_int = 0;
 var global_version: c_uint = c.EV_NONE;
@@ -89,7 +90,7 @@ const Scn = struct {
     };
 
     fn init(elf: *Elf, state: State, index: usize) !Scn {
-        //std.log.debug("scn: {}", .{state});
+        std.log.debug("scn: {}", .{state});
         return Scn{
             .elf = elf,
             .state = state,
@@ -136,6 +137,8 @@ const Memory = union(enum) {
 
 const Elf = struct {
     kind: c.Elf_Kind,
+    memory: Memory,
+    sections: SectionList,
     state: union(enum) {
         elf32: struct {
             ehdr: *c.Elf32_Ehdr,
@@ -162,8 +165,6 @@ const Elf = struct {
             };
         }
     },
-    memory: Memory,
-    sections: std.ArrayList(Scn),
 
     fn cast(elf: *c.Elf) *Elf {
         return @ptrCast(*Elf, @alignCast(@alignOf(*Elf), elf));
@@ -214,8 +215,10 @@ const Elf = struct {
     }
 
     fn end(self: *Elf) void {
-        for (self.sections.items) |*scn| scn.deinit();
-        self.sections.deinit();
+        while (self.sections.pop()) |node| {
+            node.data.deinit();
+            allocator.destroy(node);
+        }
 
         switch (self.memory) {
             .owned => |mem| allocator.free(mem),
@@ -227,14 +230,16 @@ const Elf = struct {
 
     fn fromMemory(memory: Memory) Error!*Elf {
         const ehdr = @ptrCast(*c.GElf_Ehdr, @alignCast(@alignOf(*c.GElf_Ehdr), memory.get().ptr));
-        //std.log.info("ehdr: {}", .{ehdr});
+        std.log.info("ehdr: {}", .{ehdr});
 
         const shdr = @ptrCast(*c.GElf_Shdr, @alignCast(@alignOf(*c.GElf_Shdr), memory.get()[ehdr.e_shoff..].ptr));
         var ret = try allocator.create(Elf);
-        ret.* = Elf{
-            .kind = .ELF_K_ELF,
-            .state = switch (ehdr.e_ident[c.EI_CLASS]) {
-                c.ELFCLASS32 => .{
+        ret.* = switch (ehdr.e_ident[c.EI_CLASS]) {
+            c.ELFCLASS32 => .{
+                .kind = .ELF_K_ELF,
+                .memory = memory,
+                .sections = SectionList{},
+                .state = .{
                     .elf32 = .{
                         .ehdr = @ptrCast(*c.Elf32_Ehdr, ehdr),
                         .section_headers = blk: {
@@ -245,7 +250,12 @@ const Elf = struct {
                         },
                     },
                 },
-                c.ELFCLASS64 => .{
+            },
+            c.ELFCLASS64 => .{
+                .kind = .ELF_K_ELF,
+                .memory = memory,
+                .sections = SectionList{},
+                .state = .{
                     .elf64 = .{
                         .ehdr = @ptrCast(*c.Elf64_Ehdr, ehdr),
                         .section_headers = blk: {
@@ -256,19 +266,37 @@ const Elf = struct {
                         },
                     },
                 },
-                else => return error.InvalidElf,
             },
-            .memory = memory,
-            .sections = std.ArrayList(Scn).init(allocator),
+            else => return error.InvalidElf,
         };
 
         // parse sections
         if (ret.is_64()) {
-            for (ret.state.elf64.section_headers) |*header, index|
-                try ret.sections.append(try Scn.init(ret, .{ .elf64 = .{ .shdr = header } }, index));
+            for (ret.state.elf64.section_headers) |*header, index| {
+                const node = try allocator.create(SectionList.Node);
+                errdefer allocator.destroy(node);
+                node.* = .{
+                    .data = try Scn.init(ret, .{
+                        .elf64 = .{
+                            .shdr = header,
+                        },
+                    }, index),
+                };
+                ret.sections.append(node);
+            }
         } else {
-            for (ret.state.elf32.section_headers) |*header, index|
-                try ret.sections.append(try Scn.init(ret, .{ .elf32 = .{ .shdr = header } }, index));
+            for (ret.state.elf32.section_headers) |*header, index| {
+                const node = try allocator.create(SectionList.Node);
+                errdefer allocator.destroy(node);
+                node.* = .{
+                    .data = try Scn.init(ret, .{
+                        .elf32 = .{
+                            .shdr = header,
+                        },
+                    }, index),
+                };
+                ret.sections.append(node);
+            }
         }
 
         return ret;
@@ -287,6 +315,7 @@ export fn elf32_fsize(elf_type: c.Elf_Type, count: usize, version: c_uint) usize
     return 0;
 }
 
+/// Retrieve class-dependent object file header.
 export fn elf32_getehdr(elf: ?*c.Elf) ?*c.Elf32_Ehdr {
     const e = Elf.cast(elf orelse return null);
 
@@ -308,6 +337,7 @@ export fn elf32_getphdr(elf: ?*c.Elf) ?*c.Elf32_Phdr {
     return null;
 }
 
+/// Retrieve section header of ELFCLASS32 binary.
 export fn elf32_getshdr(scn: ?*c.Elf_Scn) ?*c.Elf32_Shdr {
     return if (scn) |s| Scn.cast(s).state.elf32.shdr else null;
 }
@@ -336,6 +366,7 @@ export fn elf64_fsize(elf_type: c.Elf_Type, count: usize, version: c_uint) usize
     return 0;
 }
 
+/// Retrieve class-dependent object file header.
 export fn elf64_getehdr(elf: ?*c.Elf) ?*c.Elf64_Ehdr {
     const e = Elf.cast(elf orelse return null);
 
@@ -357,12 +388,25 @@ export fn elf64_getphdr(elf: ?*c.Elf) ?*c.Elf64_Phdr {
     return null;
 }
 
+/// Retrieve section header of ELFCLASS64 binary.
 export fn elf64_getshdr(scn: ?*c.Elf_Scn) ?*c.Elf64_Shdr {
     return if (scn) |s| Scn.cast(s).state.elf64.shdr else null;
 }
 
-// libbpf
+/// Create ELF header if none exists.
 export fn elf64_newehdr(elf: ?*c.Elf) ?*c.Elf64_Ehdr {
+    const e = Elf.cast(elf orelse return null);
+    if (e.kind != .ELF_K_ELF) {
+        seterrno(error.InvalidHandle);
+        return null;
+    }
+
+    if (!e.is_64()) {
+        seterrno(error.InvalidClass);
+        return null;
+    }
+
+    // TODO: make ehdr optional for the case of user created elf
     return null;
 }
 
@@ -378,6 +422,7 @@ export fn elf64_xlatetom(dest: ?*c.Elf_Data, src: ?*const c.Elf_Data, encode: c_
     return null;
 }
 
+/// Return descriptor for ELF file to work according to CMD.
 export fn elf_begin(fd: c_int, cmd: c.Elf_Cmd, ref: ?*c.Elf) ?*c.Elf {
     return @ptrCast(*c.Elf, Elf.begin(fd, cmd, if (ref) |r| Elf.cast(r) else null) catch |e| {
         seterrno(e);
@@ -393,6 +438,7 @@ export fn elf_cntl(elf: ?*c.Elf, cmd: c.Elf_Cmd) c_int {
     return -1;
 }
 
+/// Free resources allocated for ELF.
 export fn elf_end(elf: ?*c.Elf) c_int {
     return if (elf) |e| blk: {
         @ptrCast(*Elf, Elf.cast(e)).end();
@@ -400,6 +446,10 @@ export fn elf_end(elf: ?*c.Elf) c_int {
     } else 0;
 }
 
+/// Return error string for ERROR.  If ERROR is zero, return error string
+/// for most recent error or NULL is none occurred.  If ERROR is -1 the
+/// behaviour is similar to the last case except that not NULL but a legal
+/// string is returned.
 export fn elf_errmsg(err: c_int) ?[*:0]const u8 {
     return if (err == 0)
         "no error"
@@ -461,6 +511,8 @@ export fn elf_errmsg(err: c_int) ?[*:0]const u8 {
     };
 }
 
+/// Return error code of last failing function call.  This value is kept
+/// separately for each thread.  */
 export fn elf_errno() c_int {
     defer global_error = 0;
     return global_error;
@@ -504,21 +556,33 @@ export fn elf_getbase(elf: ?*c.Elf) i64 {
     return -1;
 }
 
-// libbpf
+/// Get data from section while translating from file representation to
+/// memory representation.  The Elf_Data d_type is set based on the
+/// section type if known.  Otherwise d_type is set to ELF_T_BYTE.  If
+/// the section contains compressed data then d_type is always set to
+/// ELF_T_CHDR.
 export fn elf_getdata(scn: ?*c.Elf_Scn, data: ?*c.Elf_Data) ?*c.Elf_Data {
-    return null;
+    return if (scn == null or data == null)
+        null
+    else
+        &Scn.cast(scn.?).data;
 }
 
 export fn elf_getident(elf: ?*c.Elf, nbytes: ?*usize) ?[*]u8 {
     return null;
 }
 
+/// Get section at INDEX.
 export fn elf_getscn(elf: ?*c.Elf, index: usize) ?*c.Elf_Scn {
     const e = Elf.cast(elf orelse return null);
-    return if (index < e.sections.items.len)
-        @ptrCast(*c.Elf_Scn, &e.sections.items[index])
-    else
-        null;
+    return if (index < e.sections.len) blk: {
+        // TODO: index management
+        var it = e.sections.first;
+        break :blk @ptrCast(*c.Elf_Scn, while (it) |node| : (it = it.?.next) {
+            if (node.data.index == index)
+                break node;
+        } else return null);
+    } else null;
 }
 
 /// deprecated
@@ -535,10 +599,12 @@ export fn elf_hash(string: [*:0]const u8) c_ulong {
     return 0;
 }
 
+/// Determine what kind of file is associated with ELF.
 export fn elf_kind(elf: ?*c.Elf) c.Elf_Kind {
     return Elf.cast(elf orelse return .ELF_K_NONE).kind;
 }
 
+/// Create descriptor for memory region.
 export fn elf_memory(image: ?[*]u8, size: usize) ?*c.Elf {
     const slice = if (image) |img| blk: {
         var s: []u8 = undefined;
@@ -556,39 +622,60 @@ export fn elf_memory(image: ?[*]u8, size: usize) ?*c.Elf {
     });
 }
 
+/// Get index of section.
 export fn elf_ndxscn(scn: ?*c.Elf_Scn) usize {
     return Scn.cast(scn orelse return c.SHN_UNDEF).index;
 }
 
-// libbpf
+/// Create new data descriptor for section SCN.
 export fn elf_newdata(scn: ?*c.Elf_Scn) ?*c.Elf_Data {
+    const s = Scn.cast(scn orelse return null);
+    if (s.index == 0) {
+        seterrno(error.NotNulSection);
+        return null;
+    }
+
+    // TODO
+
     return null;
 }
 
-// TODO
+/// Create a new section and append it at the end of the table.
 export fn elf_newscn(elf: ?*c.Elf) ?*c.Elf_Scn {
+    const e = Elf.cast(elf orelse return null);
+    const node = allocator.create(SectionList.Node) catch |err| {
+        seterrno(err);
+        return null;
+    };
+    node.* = .{
+        .data = undefined,
+    };
+
+    e.sections.append(node);
     return null;
 }
 
+/// Advance archive descriptor to next element.
 export fn elf_next(elf: ?*c.Elf) c.Elf_Cmd {
     return .ELF_C_NULL;
 }
 
+/// Get section with next section index.
 export fn elf_nextscn(elf: ?*c.Elf, scn: ?*c.Elf_Scn) ?*c.Elf_Scn {
     const e = Elf.cast(elf orelse return null);
     const s = Scn.cast(scn orelse return null);
-    return if (s.index + 1 < e.sections.items.len)
-        @ptrCast(*c.Elf_Scn, &e.sections.items[s.index + 1])
-    else
-        null;
+    const node = @fieldParentPtr(SectionList.Node, "data", s);
+
+    return if (node.next) |next| @ptrCast(*c.Elf_Scn, &next.data) else null;
 }
 
 export fn elf_rand(elf: ?*c.Elf, offset: usize) usize {
     return 0;
 }
 
-// libbpf
+/// Get uninterpreted section content.
 export fn elf_rawdata(scn: ?*c.Elf_Scn, data: ?*c.Elf_Data) ?*c.Elf_Data {
+    // TODO
     return null;
 }
 
@@ -596,16 +683,19 @@ export fn elf_rawfile(elf: ?*c.Elf, nbytes: *usize) ?[*]u8 {
     return null;
 }
 
-// libbpf
+/// Return pointer to string at OFFSET in section INDEX.
 export fn elf_strptr(elf: ?*c.Elf, index: usize, offset: usize) ?[*:0]const u8 {
+    // TODO
     return null;
 }
 
-// libbpf
+/// Update ELF descriptor and write file to disk.
 export fn elf_update(elf: ?*c.Elf, cmd: c.Elf_Cmd) i64 {
+    // TODO
     return -1;
 }
 
+/// Coordinate ELF library and application versions.
 export fn elf_version(version: c_uint) c_uint {
     return if (version == @as(c_uint, c.EV_NONE))
         c.EV_CURRENT
@@ -626,8 +716,9 @@ export fn gelf_fsize(elf: ?*c.Elf, elf_type: c.Elf_Type, count: usize, version: 
     return 0;
 }
 
-// libbpf
+/// Get class of the file associated with ELF.  */
 export fn gelf_getclass(elf: ?*c.Elf) c_int {
+    // TODO
     return 0;
 }
 
@@ -635,6 +726,7 @@ export fn gelf_getdyn(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Dyn) ?*c.GEl
     return null;
 }
 
+/// Retrieve object file header.
 export fn gelf_getehdr(elf: ?*c.Elf, dst: ?*c.GElf_Ehdr) ?*c.GElf_Ehdr {
     if (elf == null or dst == null)
         return null;
@@ -677,8 +769,9 @@ export fn gelf_getphdr(elf: ?*c.Elf, ndr: c_int, dst: ?*c.GElf_Phdr) ?*c.GElf_Ph
     return null;
 }
 
-// libbpf
+/// Retrieve REL relocation info at the given index.
 export fn gelf_getrel(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Rel) ?*c.GElf_Rel {
+    // TODO
     return null;
 }
 
@@ -686,6 +779,7 @@ export fn gelf_getrela(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Rela) ?*c.G
     return null;
 }
 
+/// Retrieve section header.
 export fn gelf_getshdr(scn: ?*c.Elf_Scn, dst: ?*c.GElf_Shdr) ?*c.GElf_Shdr {
     if (scn == null or dst == null)
         return null;
@@ -712,8 +806,9 @@ export fn gelf_getshdr(scn: ?*c.Elf_Scn, dst: ?*c.GElf_Shdr) ?*c.GElf_Shdr {
     return dst.?;
 }
 
-// libbpf
+/// Retrieve symbol information from the symbol table at the given index.
 export fn gelf_getsym(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Sym) ?*c.GElf_Sym {
+    // TODO
     return null;
 }
 
@@ -873,6 +968,10 @@ export fn elf_scnshndx(__scn: ?*c.Elf_Scn) c_int {
     return -1;
 }
 
+/// Get the number of sections in the ELF file.  If the file uses more
+/// sections than can be represented in the e_shnum field of the ELF
+/// header the information from the sh_size field in the zeroth section
+/// header is used.
 export fn elf_getshdrnum(elf: ?*c.Elf, dst: ?*usize) c_int {
     if (elf == null or dst == null)
         return -1;
@@ -881,6 +980,10 @@ export fn elf_getshdrnum(elf: ?*c.Elf, dst: ?*usize) c_int {
     return 0;
 }
 
+/// Get the section index of the section header string table in the ELF
+/// file.  If the index cannot be represented in the e_shstrndx field of
+/// the ELF header the information from the sh_link field in the zeroth
+/// section header is used.
 export fn elf_getshdrstrndx(elf: ?*c.Elf, dst: ?*usize) c_int {
     if (elf == null or dst == null)
         return -1;
