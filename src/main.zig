@@ -870,10 +870,15 @@ export fn gelf_fsize(elf: ?*c.Elf, elf_type: c.Elf_Type, count: usize, version: 
     return 0;
 }
 
-/// Get class of the file associated with ELF.  */
+/// Get class of the file associated with ELF
 export fn gelf_getclass(elf: ?*c.Elf) c_int {
-    // TODO
-    return 0;
+    const e = Elf.cast(elf orelse return c.ELFCLASSNONE);
+    return if (e.kind != .ELF_K_ELF)
+        c.ELFCLASSNONE
+    else switch (e.state) {
+        .elf32 => c.ELFCLASS32,
+        .elf64 => c.ELFCLASS64,
+    };
 }
 
 /// Get information from dynamic table at the given index
