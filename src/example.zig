@@ -9,7 +9,7 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer allocator.free(args);
 
-    const file = try std.fs.openFileAbsolute(args[0], .{});
+    const file = try std.fs.openFileAbsolute(if (args.len > 1) args[1] else args[0], .{});
     defer file.close();
 
     std.log.info("elf version: {}", .{c.elf_version(c.EV_CURRENT)});
