@@ -111,7 +111,7 @@ const Scn = struct {
                         .data = .{
                             .s = self,
                             .d = .{
-                                .d_buf = @intToPtr(?*c_void, @ptrToInt(elf.memory.get().ptr) + e.shdr.sh_offset),
+                                .d_buf = @intToPtr(?*c_void, @ptrToInt(elf.memory.ptr) + e.shdr.sh_offset),
                                 .d_type = @intToEnum(c.Elf_Type, @intCast(c_int, e.shdr.sh_type)),
                                 .d_version = global_version,
                                 .d_size = e.shdr.sh_size,
@@ -133,7 +133,7 @@ const Scn = struct {
                         .data = .{
                             .s = self,
                             .d = .{
-                                .d_buf = @intToPtr(?*c_void, @ptrToInt(elf.memory.get().ptr) + e.shdr.sh_offset),
+                                .d_buf = @intToPtr(?*c_void, @ptrToInt(elf.memory.ptr) + e.shdr.sh_offset),
                                 .d_type = @intToEnum(c.Elf_Type, @intCast(c_int, e.shdr.sh_type)),
                                 .d_version = global_version,
                                 .d_size = e.shdr.sh_size,
@@ -171,22 +171,10 @@ const Scn = struct {
     }
 };
 
-const Memory = union(enum) {
-    referenced: []u8,
-    owned: []u8,
-
-    fn get(self: Memory) []u8 {
-        return switch (self) {
-            .owned => |mem| mem,
-            .referenced => |mem| mem,
-        };
-    }
-};
-
 const Elf = struct {
     arena: std.heap.ArenaAllocator,
     kind: c.Elf_Kind,
-    memory: Memory,
+    memory: []u8,
     sections: SectionList,
     state: union(enum) {
         elf32: struct {
@@ -220,11 +208,11 @@ const Elf = struct {
     }
 
     fn is_64(elf: *Elf) bool {
-        return elf.memory.get()[c.EI_CLASS] == c.ELFCLASS64;
+        return elf.memory[c.EI_CLASS] == c.ELFCLASS64;
     }
 
     fn is_32(elf: *Elf) bool {
-        return elf.memory.get()[c.EI_CLASS] == c.ELFCLASS32;
+        return elf.memory[c.EI_CLASS] == c.ELFCLASS32;
     }
 
     fn validEndianness(elf: *Elf) !bool {
@@ -252,11 +240,15 @@ const Elf = struct {
             .ELF_C_NULL => null,
             .ELF_C_READ, .ELF_C_READ_MMAP => blk: {
                 const file = std.fs.File{ .handle = fd };
-                break :blk fromMemory(.{
-                    .owned = file.reader().readAllAlloc(allocator, std.math.maxInt(usize)) catch |e| {
+                var arena = std.heap.ArenaAllocator.init(allocator);
+                errdefer arena.deinit();
+
+                break :blk fromMemory(
+                    file.reader().readAllAlloc(&arena.allocator, std.math.maxInt(usize)) catch |e| {
                         return error.InvalidFile;
                     },
-                });
+                    arena,
+                );
             },
             .ELF_C_WRITE => error.Todo,
             else => error.Todo,
@@ -269,59 +261,55 @@ const Elf = struct {
             allocator.destroy(node);
         }
 
-        switch (self.memory) {
-            .owned => |mem| allocator.free(mem),
-            .referenced => {},
-        }
-
+        self.arena.deinit();
         allocator.destroy(self);
     }
 
-    fn fromMemory(memory: Memory) Error!*Elf {
-        const class = memory.get()[c.EI_CLASS];
-        var arena = std.heap.ArenaAllocator.init(allocator);
+    fn fromMemory(memory: []u8, arena: ?std.heap.ArenaAllocator) Error!*Elf {
+        const class = memory[c.EI_CLASS];
+        var a = arena orelse std.heap.ArenaAllocator.init(allocator);
 
         var ret = try allocator.create(Elf);
         errdefer allocator.destroy(ret);
 
         ret.* = switch (class) {
             c.ELFCLASS32 => .{
-                .arena = arena,
+                .arena = a,
                 .kind = .ELF_K_ELF,
                 .memory = memory,
                 .sections = SectionList{},
                 .state = .{
                     .elf32 = .{
-                        .ehdr = @ptrCast(*c.Elf32_Ehdr, @alignCast(@alignOf(*c.Elf32_Ehdr), memory.get().ptr)),
+                        .ehdr = @ptrCast(*c.Elf32_Ehdr, @alignCast(@alignOf(*c.Elf32_Ehdr), memory.ptr)),
                         .section_headers = blk: {
-                            const ehdr = @ptrCast(*c.Elf32_Ehdr, @alignCast(@alignOf(*c.Elf32_Ehdr), memory.get().ptr));
+                            const ehdr = @ptrCast(*c.Elf32_Ehdr, @alignCast(@alignOf(*c.Elf32_Ehdr), memory.ptr));
 
-                            if (ehdr.e_shoff > memory.get().len)
+                            if (ehdr.e_shoff > memory.len)
                                 return error.InvalidElf;
 
-                            const sections = try arena.allocator.alloc(c.Elf32_Shdr, ehdr.e_shnum);
-                            std.mem.copy(u8, std.mem.sliceAsBytes(sections), memory.get()[ehdr.e_shoff .. ehdr.e_shoff + (ehdr.e_shnum * @sizeOf(c.Elf32_Shdr))]);
+                            const sections = try a.allocator.alloc(c.Elf32_Shdr, ehdr.e_shnum);
+                            std.mem.copy(u8, std.mem.sliceAsBytes(sections), memory[ehdr.e_shoff .. ehdr.e_shoff + (ehdr.e_shnum * @sizeOf(c.Elf32_Shdr))]);
                             break :blk sections;
                         },
                     },
                 },
             },
             c.ELFCLASS64 => .{
-                .arena = arena,
+                .arena = a,
                 .kind = .ELF_K_ELF,
                 .memory = memory,
                 .sections = SectionList{},
                 .state = .{
                     .elf64 = .{
-                        .ehdr = @ptrCast(*c.Elf64_Ehdr, @alignCast(@alignOf(*c.Elf64_Ehdr), memory.get().ptr)),
+                        .ehdr = @ptrCast(*c.Elf64_Ehdr, @alignCast(@alignOf(*c.Elf64_Ehdr), memory.ptr)),
                         .section_headers = blk: {
-                            const ehdr = @ptrCast(*c.Elf64_Ehdr, @alignCast(@alignOf(*c.Elf64_Ehdr), memory.get().ptr));
+                            const ehdr = @ptrCast(*c.Elf64_Ehdr, @alignCast(@alignOf(*c.Elf64_Ehdr), memory.ptr));
 
-                            if (ehdr.e_shoff > memory.get().len)
+                            if (ehdr.e_shoff > memory.len)
                                 return error.InvalidElf;
 
-                            const sections = try arena.allocator.alloc(c.Elf64_Shdr, ehdr.e_shnum);
-                            std.mem.copy(u8, std.mem.sliceAsBytes(sections), memory.get()[ehdr.e_shoff .. ehdr.e_shoff + (ehdr.e_shnum * @sizeOf(c.Elf64_Shdr))]);
+                            const sections = try a.allocator.alloc(c.Elf64_Shdr, ehdr.e_shnum);
+                            std.mem.copy(u8, std.mem.sliceAsBytes(sections), memory[ehdr.e_shoff .. ehdr.e_shoff + (ehdr.e_shnum * @sizeOf(c.Elf64_Shdr))]);
                             break :blk sections;
                         },
                     },
@@ -365,7 +353,7 @@ const Elf = struct {
     }
 
     fn getehdr(self: *Elf, comptime T: type) *T {
-        return @ptrCast(*T, @alignCast(@alignOf(*T), self.memory.get().ptr));
+        return @ptrCast(*T, @alignCast(@alignOf(*T), self.memory.ptr));
     }
 };
 
@@ -719,7 +707,7 @@ export fn elf_memory(image: ?[*]u8, size: usize) ?*c.Elf {
         return null;
     };
 
-    return @ptrCast(*c.Elf, Elf.fromMemory(.{ .referenced = slice }) catch |e| {
+    return @ptrCast(*c.Elf, Elf.fromMemory(slice, null) catch |e| {
         seterrno(e);
         return null;
     });
@@ -824,7 +812,7 @@ export fn elf_strptr(elf: ?*c.Elf, index: usize, offset: usize) ?[*:0]const u8 {
     return while (it) |node| : (it = it.?.next) {
         if (node.data.index == index) {
             const scn = node.data;
-            const data = e.memory.get()[scn.offset() .. scn.offset() + scn.size()];
+            const data = e.memory[scn.offset() .. scn.offset() + scn.size()];
             const str = data[offset..];
 
             // check for null terminator
