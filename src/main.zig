@@ -755,26 +755,40 @@ export fn elf_newdata(scn: ?*c.Elf_Scn) ?*c.Elf_Data {
     return &node.data.d;
 }
 
-/// Create a new section and append it at the end of the table
-export fn elf_newscn(elf: ?*c.Elf) ?*c.Elf_Scn {
-    const e = Elf.cast(elf orelse return null);
-    const node = allocator.create(SectionList.Node) catch |err| {
-        seterrno(err);
-        return null;
-    };
+fn newscn(elf: *Elf) Error!*Scn {
+    const node = try allocator.create(SectionList.Node);
+    errdefer allocator.destroy(node);
 
     node.* = .{
         .data = .{
-            .elf = e,
+            .elf = elf,
             .data_list = DataList{},
-            .index = e.sections.len,
-            // TODO: probably not make this undefined
-            .state = undefined,
+            .index = elf.sections.len,
+            .state = if (elf.is_32()) .{
+                .elf32 = .{
+                    // TODO: what are the default values here?
+                    .shdr = try elf.arena.allocator.create(c.Elf32_Shdr),
+                },
+            } else .{
+                .elf64 = .{
+                    // TODO: what are the default values here?
+                    .shdr = try elf.arena.allocator.create(c.Elf64_Shdr),
+                },
+            },
         },
     };
 
-    e.sections.append(node);
-    return null;
+    elf.sections.append(node);
+    return &node.data;
+}
+
+/// Create a new section and append it at the end of the table
+export fn elf_newscn(elf: ?*c.Elf) ?*c.Elf_Scn {
+    const e = Elf.cast(elf orelse return null);
+    return @ptrCast(*c.Elf_Scn, newscn(e) catch |err| {
+        seterrno(err);
+        return null;
+    });
 }
 
 /// Advance archive descriptor to next element
@@ -797,6 +811,16 @@ export fn elf_rand(elf: ?*c.Elf, offset: usize) usize {
 
 /// Get uninterpreted section content.
 export fn elf_rawdata(scn: ?*c.Elf_Scn, data: ?*c.Elf_Data) ?*c.Elf_Data {
+    const s = Scn.cast(scn orelse {
+        seterrno(error.InvalidHandle);
+        return null;
+    });
+
+    if (s.elf.kind != .ELF_K_ELF) {
+        seterrno(error.InvalidHandle);
+        return null;
+    }
+
     // TODO
     return null;
 }
@@ -828,7 +852,21 @@ export fn elf_strptr(elf: ?*c.Elf, index: usize, offset: usize) ?[*:0]const u8 {
 
 /// Update ELF descriptor and write file to disk
 export fn elf_update(elf: ?*c.Elf, cmd: c.Elf_Cmd) i64 {
-    // TODO
+    switch (cmd) {
+        .ELF_C_NULL, .ELF_C_WRITE, .ELF_C_WRITE_MMAP => {},
+        else => {
+            seterrno(error.InvalidCommand);
+            return -1;
+        },
+    }
+
+    const e = Elf.cast(elf orelse return -1);
+    if (e.kind != .ELF_K_ELF) {
+        seterrno(error.InvalidHandle);
+        return -1;
+    }
+
+    // Make sure we have an ELF header
     return -1;
 }
 
@@ -886,7 +924,6 @@ export fn gelf_getehdr(elf: ?*c.Elf, dst: ?*c.GElf_Ehdr) ?*c.GElf_Ehdr {
     }
 
     // TODO: check for uncreated ehdr
-
     if (e.is_32()) {
         const ehdr = e.getehdr(c.Elf32_Ehdr);
         dst.?.e_type = ehdr.e_type;
@@ -959,8 +996,45 @@ export fn gelf_getshdr(scn: ?*c.Elf_Scn, dst: ?*c.GElf_Shdr) ?*c.GElf_Shdr {
 
 /// Retrieve symbol information from the symbol table at the given index.
 export fn gelf_getsym(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Sym) ?*c.GElf_Sym {
-    // TODO
-    return null;
+    const data_scn = @fieldParentPtr(ScnData, "d", data orelse return null);
+    const d = dst orelse return null;
+
+    if (data_scn.d.d_type != .ELF_T_SYM) {
+        seterrno(error.InvalidHandle);
+        return null;
+    }
+
+    if (data_scn.s.elf.is_32()) {
+        var syms: []c.Elf32_Sym = undefined;
+        syms.ptr = @ptrCast([*]c.Elf32_Sym, @alignCast(@alignOf([*]c.Elf32_Sym), data_scn.d.d_buf));
+        syms.len = data_scn.d.d_size / @sizeOf(c.Elf32_Sym);
+
+        if (ndx >= syms.len and ndx > 0) {
+            seterrno(error.InvalidIndex);
+            return null;
+        }
+
+        const sym = &syms[@intCast(usize, ndx)];
+        d.st_name = sym.st_name;
+        d.st_info = sym.st_info;
+        d.st_other = sym.st_other;
+        d.st_shndx = sym.st_shndx;
+        d.st_value = sym.st_value;
+        d.st_size = sym.st_size;
+    } else {
+        var syms: []c.GElf_Sym = undefined;
+        syms.ptr = @ptrCast([*]c.GElf_Sym, @alignCast(@alignOf([*]c.GElf_Sym), data_scn.d.d_buf));
+        syms.len = data_scn.d.d_size / @sizeOf(c.GElf_Sym);
+
+        if (ndx >= syms.len and ndx > 0) {
+            seterrno(error.InvalidIndex);
+            return null;
+        }
+
+        d.* = syms[@intCast(usize, ndx)];
+    }
+
+    return d;
 }
 
 /// Retrieve additional symbol information from the symbol table at the
