@@ -178,27 +178,27 @@ const Elf = struct {
     sections: SectionList,
     state: union(enum) {
         elf32: struct {
-            ehdr: *c.Elf32_Ehdr,
+            ehdr: ?*c.Elf32_Ehdr,
             section_headers: []c.Elf32_Shdr,
         },
         elf64: struct {
-            ehdr: *c.Elf64_Ehdr,
+            ehdr: ?*c.Elf64_Ehdr,
             section_headers: []c.Elf64_Shdr,
         },
 
         const Self = @This();
 
-        fn shstrndx(self: Self) usize {
+        fn shstrndx(self: Self) !usize {
             return switch (self) {
-                .elf32 => |elf| elf.ehdr.e_shstrndx,
-                .elf64 => |elf| elf.ehdr.e_shstrndx,
+                .elf32 => |elf| if (elf.ehdr) |h| h.e_shstrndx else return error.InvalidData,
+                .elf64 => |elf| if (elf.ehdr) |h| h.e_shstrndx else return error.InvalidData,
             };
         }
 
-        fn shnum(self: Self) usize {
+        fn shnum(self: Self) !usize {
             return switch (self) {
-                .elf32 => |elf| elf.ehdr.e_shnum,
-                .elf64 => |elf| elf.ehdr.e_shnum,
+                .elf32 => |elf| if (elf.ehdr) |h| h.e_shnum else return error.InvalidData,
+                .elf64 => |elf| if (elf.ehdr) |h| h.e_shnum else return error.InvalidData,
             };
         }
     },
@@ -216,7 +216,7 @@ const Elf = struct {
     }
 
     fn validEndianness(elf: *Elf) !bool {
-        return switch (elf.state.elf64.ehdr.e_ident[c.EI_DATA]) {
+        return switch (elf.memory[c.EI_DATA]) {
             c.ELFDATA2LSB => builtin.target.cpu.arch.endian() == .Little,
             c.ELFDATA2MSB => builtin.target.cpu.arch.endian() == .Big,
             else => error.InvalidData,
@@ -351,10 +351,6 @@ const Elf = struct {
 
         return ret;
     }
-
-    fn getehdr(self: *Elf, comptime T: type) *T {
-        return @ptrCast(*T, @alignCast(@alignOf(*T), self.memory.ptr));
-    }
 };
 
 /// Compute simple checksum from permanent parts of the ELF file
@@ -384,7 +380,10 @@ export fn elf32_getehdr(elf: ?*c.Elf) ?*c.Elf32_Ehdr {
         return null;
     }
 
-    return Elf.cast(elf orelse return null).getehdr(c.Elf32_Ehdr);
+    return Elf.cast(elf orelse return null).state.elf32.ehdr orelse {
+        seterrno(error.InvalidData);
+        return null;
+    };
 }
 
 /// Get the number of program headers in the ELF file.  If the file uses
@@ -449,7 +448,10 @@ export fn elf64_getehdr(elf: ?*c.Elf) ?*c.Elf64_Ehdr {
         return null;
     }
 
-    return Elf.cast(elf orelse return null).getehdr(c.Elf64_Ehdr);
+    return Elf.cast(elf orelse return null).state.elf64.ehdr orelse {
+        seterrno(error.InvalidData);
+        return null;
+    };
 }
 
 /// Retrieve class-dependent program header table
@@ -475,8 +477,14 @@ export fn elf64_newehdr(elf: ?*c.Elf) ?*c.Elf64_Ehdr {
         return null;
     }
 
-    // TODO: make ehdr optional for the case of user created elf
-    return null;
+    // TODO: what to initialize with?
+    const ret = e.arena.allocator.create(c.Elf64_Ehdr) catch |err| {
+        seterrno(err);
+        return null;
+    };
+
+    e.state.elf64.ehdr = ret;
+    return ret;
 }
 
 /// Create ELF program header
@@ -766,13 +774,19 @@ fn newscn(elf: *Elf) Error!*Scn {
             .index = elf.sections.len,
             .state = if (elf.is_32()) .{
                 .elf32 = .{
-                    // TODO: what are the default values here?
-                    .shdr = try elf.arena.allocator.create(c.Elf32_Shdr),
+                    .shdr = blk: {
+                        const ret = try elf.arena.allocator.create(c.Elf32_Shdr);
+                        @memset(@ptrCast([*]u8, ret), 0, @sizeOf(c.Elf32_Shdr));
+                        break :blk ret;
+                    },
                 },
             } else .{
                 .elf64 = .{
-                    // TODO: what are the default values here?
-                    .shdr = try elf.arena.allocator.create(c.Elf64_Shdr),
+                    .shdr = blk: {
+                        const ret = try elf.arena.allocator.create(c.Elf64_Shdr);
+                        @memset(@ptrCast([*]u8, ret), 0, @sizeOf(c.Elf64_Shdr));
+                        break :blk ret;
+                    },
                 },
             },
         },
@@ -923,9 +937,12 @@ export fn gelf_getehdr(elf: ?*c.Elf, dst: ?*c.GElf_Ehdr) ?*c.GElf_Ehdr {
         return null;
     }
 
-    // TODO: check for uncreated ehdr
     if (e.is_32()) {
-        const ehdr = e.getehdr(c.Elf32_Ehdr);
+        const ehdr = e.state.elf32.ehdr orelse {
+            seterrno(error.InvalidData);
+            return null;
+        };
+
         dst.?.e_type = ehdr.e_type;
         dst.?.e_machine = ehdr.e_machine;
         dst.?.e_version = ehdr.e_version;
@@ -940,7 +957,10 @@ export fn gelf_getehdr(elf: ?*c.Elf, dst: ?*c.GElf_Ehdr) ?*c.GElf_Ehdr {
         dst.?.e_shnum = ehdr.e_shnum;
         dst.?.e_shstrndx = ehdr.e_shstrndx;
     } else {
-        dst.?.* = e.getehdr(c.GElf_Ehdr).*;
+        dst.?.* = (e.state.elf64.ehdr orelse {
+            seterrno(error.InvalidData);
+            return null;
+        }).*;
     }
 
     return dst.?;
@@ -958,8 +978,45 @@ export fn gelf_getphdr(elf: ?*c.Elf, ndr: c_int, dst: ?*c.GElf_Phdr) ?*c.GElf_Ph
 
 /// Retrieve REL relocation info at the given index.
 export fn gelf_getrel(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Rel) ?*c.GElf_Rel {
-    // TODO
-    return null;
+    const d = dst orelse return null;
+    const data_scn = @fieldParentPtr(
+        ScnData,
+        "d",
+        @ptrCast(*c.Elf_Data, data orelse return null),
+    );
+
+    if (data_scn.d.d_type != .ELF_T_REL) {
+        seterrno(error.InvalidHandle);
+        return null;
+    }
+
+    if (data_scn.s.elf.is_32()) {
+        var rels: []c.Elf32_Rel = undefined;
+        rels.ptr = @ptrCast([*]c.Elf32_Rel, @alignCast(@alignOf([*]c.Elf32_Rel), data_scn.d.d_buf));
+        rels.len = data_scn.d.d_size / @sizeOf(c.Elf32_Rel);
+
+        if (ndx >= rels.len or ndx < 0) {
+            seterrno(error.InvalidIndex);
+            return null;
+        }
+
+        const rel = &rels[@intCast(usize, ndx)];
+        d.r_offset = rel.r_offset;
+        d.r_info = (rel.r_info << 24) + (rel.r_info & 0xff);
+    } else {
+        var rels: []c.Elf64_Rel = undefined;
+        rels.ptr = @ptrCast([*]c.Elf64_Rel, @alignCast(@alignOf([*]c.Elf64_Rel), data_scn.d.d_buf));
+        rels.len = data_scn.d.d_size / @sizeOf(c.Elf64_Rel);
+
+        if (ndx >= rels.len or ndx < 0) {
+            seterrno(error.InvalidIndex);
+            return null;
+        }
+
+        d.* = rels[@intCast(usize, ndx)];
+    }
+
+    return d;
 }
 
 /// Retrieve RELA relocation info at the given index
@@ -1256,7 +1313,11 @@ export fn elf_getshdrnum(elf: ?*c.Elf, dst: ?*usize) c_int {
     if (elf == null or dst == null)
         return -1;
 
-    dst.?.* = Elf.cast(elf.?).state.shnum();
+    dst.?.* = Elf.cast(elf.?).state.shnum() catch |e| {
+        seterrno(e);
+        return -1;
+    };
+
     return 0;
 }
 
@@ -1268,7 +1329,11 @@ export fn elf_getshdrstrndx(elf: ?*c.Elf, dst: ?*usize) c_int {
     if (elf == null or dst == null)
         return -1;
 
-    dst.?.* = Elf.cast(elf.?).state.shstrndx();
+    dst.?.* = Elf.cast(elf.?).state.shstrndx() catch |e| {
+        seterrno(e);
+        return -1;
+    };
+
     return 0;
 }
 
