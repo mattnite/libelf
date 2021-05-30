@@ -24,9 +24,20 @@ pub fn build(b: *std.build.Builder) void {
     shared.linkLibC();
     shared.install();
 
+    const example = b.addExecutable("example", "src/example.zig");
+    example.setBuildMode(mode);
+    example.setTarget(target);
+    example.addIncludeDir("include");
+    example.linkLibrary(static);
+    example.linkLibC();
+
     var main_tests = b.addTest("src/main.zig");
     main_tests.setBuildMode(mode);
 
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&main_tests.step);
+
+    const example_run = example.run();
+    const example_step = b.step("example", "Run example program");
+    example_step.dependOn(&example_run.step);
 }
