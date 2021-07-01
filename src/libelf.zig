@@ -5,6 +5,8 @@ const c = @cImport({
     @cInclude("nlist.h");
 });
 
+const log = std.log.scoped(.libelf);
+
 const Allocator = std.mem.Allocator;
 const SectionList = std.TailQueue(Scn);
 const DataList = std.TailQueue(ScnData);
@@ -74,6 +76,7 @@ pub const Error = error{
 };
 
 fn seterrno(err: Error) void {
+    log.debug("setting errno to {s}", .{@errorName(err)});
     global_error = @errorToInt(err);
 }
 
@@ -96,7 +99,7 @@ const Scn = struct {
     };
 
     fn init(elf: *Elf, self: *Scn, state: State, index: usize) !Scn {
-        std.log.debug("scn: {}", .{state});
+        log.debug("scn: {}", .{state});
         return Scn{
             .elf = elf,
             .state = state,
@@ -112,7 +115,7 @@ const Scn = struct {
                             .s = self,
                             .d = .{
                                 .d_buf = @intToPtr(?*c_void, @ptrToInt(elf.memory.ptr) + e.shdr.sh_offset),
-                                .d_type = @intToEnum(c.Elf_Type, @intCast(c_int, e.shdr.sh_type)),
+                                .d_type = shdrTypeToDataType(e.shdr.sh_type),
                                 .d_version = global_version,
                                 .d_size = e.shdr.sh_size,
                                 .d_off = e.shdr.sh_offset,
@@ -134,7 +137,7 @@ const Scn = struct {
                             .s = self,
                             .d = .{
                                 .d_buf = @intToPtr(?*c_void, @ptrToInt(elf.memory.ptr) + e.shdr.sh_offset),
-                                .d_type = @intToEnum(c.Elf_Type, @intCast(c_int, e.shdr.sh_type)),
+                                .d_type = shdrTypeToDataType(e.shdr.sh_type),
                                 .d_version = global_version,
                                 .d_size = e.shdr.sh_size,
                                 .d_off = @intCast(i64, e.shdr.sh_offset),
@@ -150,7 +153,34 @@ const Scn = struct {
         };
     }
 
-    fn deinit(self: *Scn) void {}
+    fn shdrTypeToDataType(sh_type: usize) c.Elf_Type {
+        return switch (sh_type) {
+            c.SHT_SYMTAB => c.ELF_T_SYM,
+            c.SHT_RELA => c.ELF_T_RELA,
+            c.SHT_HASH => c.ELF_T_WORD,
+            c.SHT_DYNAMIC => c.ELF_T_DYN,
+            c.SHT_REL => c.ELF_T_REL,
+            c.SHT_DYNSYM => c.ELF_T_SYM,
+            c.SHT_INIT_ARRAY => c.ELF_T_ADDR,
+            c.SHT_FINI_ARRAY => c.ELF_T_ADDR,
+            c.SHT_PREINIT_ARRAY => c.ELF_T_ADDR,
+            c.SHT_GROUP => c.ELF_T_WORD,
+            c.SHT_SYMTAB_SHNDX => c.ELF_T_WORD,
+            c.SHT_NOTE => c.ELF_T_NHDR,
+            c.SHT_GNU_verdef => c.ELF_T_VDEF,
+            c.SHT_GNU_verneed => c.ELF_T_VNEED,
+            c.SHT_GNU_versym => c.ELF_T_HALF,
+            c.SHT_SUNW_syminfo => c.ELF_T_SYMINFO,
+            c.SHT_SUNW_move => c.ELF_T_MOVE,
+            c.SHT_GNU_LIBLIST => c.ELF_T_LIB,
+            c.SHT_GNU_HASH => c.ELF_T_GNUHASH,
+            else => c.ELF_T_BYTE,
+        };
+    }
+
+    fn deinit(self: *Scn) void {
+        _ = self;
+    }
 
     fn cast(scn: *c.Elf_Scn) *Scn {
         return @ptrCast(*Scn, @alignCast(@alignOf(*Scn), scn));
@@ -228,6 +258,7 @@ const Elf = struct {
             return error.NoVersion;
 
         if (ref) |r| {
+            _ = r;
             // TODO: r.rwlock();
         } else {
             _ = std.os.fcntl(fd, std.c.F_GETFD, 0) catch {
@@ -237,20 +268,20 @@ const Elf = struct {
         // TODO: defer if (ref) |r| r.unlock();
 
         return switch (cmd) {
-            .ELF_C_NULL => null,
-            .ELF_C_READ, .ELF_C_READ_MMAP => blk: {
+            c.ELF_C_NULL => null,
+            c.ELF_C_READ, c.ELF_C_READ_MMAP => blk: {
                 const file = std.fs.File{ .handle = fd };
                 var arena = std.heap.ArenaAllocator.init(allocator);
                 errdefer arena.deinit();
 
                 break :blk fromMemory(
-                    file.reader().readAllAlloc(&arena.allocator, std.math.maxInt(usize)) catch |e| {
+                    file.reader().readAllAlloc(&arena.allocator, std.math.maxInt(usize)) catch {
                         return error.InvalidFile;
                     },
                     arena,
                 );
             },
-            .ELF_C_WRITE => error.Todo,
+            c.ELF_C_WRITE => error.Todo,
             else => error.Todo,
         };
     }
@@ -275,7 +306,7 @@ const Elf = struct {
         ret.* = switch (class) {
             c.ELFCLASS32 => .{
                 .arena = a,
-                .kind = .ELF_K_ELF,
+                .kind = c.ELF_K_ELF,
                 .memory = memory,
                 .sections = SectionList{},
                 .state = .{
@@ -296,7 +327,7 @@ const Elf = struct {
             },
             c.ELFCLASS64 => .{
                 .arena = a,
-                .kind = .ELF_K_ELF,
+                .kind = c.ELF_K_ELF,
                 .memory = memory,
                 .sections = SectionList{},
                 .state = .{
@@ -355,6 +386,7 @@ const Elf = struct {
 
 /// Compute simple checksum from permanent parts of the ELF file
 export fn elf32_checksum(elf: ?*c.Elf) c_long {
+    _ = elf;
     return -1;
 }
 
@@ -362,6 +394,9 @@ export fn elf32_checksum(elf: ?*c.Elf) c_long {
 /// in the external representation.  The binary class is taken from ELF.
 /// The result is based on version VERSION of the ELF standard.
 export fn elf32_fsize(elf_type: c.Elf_Type, count: usize, version: c_uint) usize {
+    _ = elf_type;
+    _ = count;
+    _ = version;
     return 0;
 }
 
@@ -369,7 +404,7 @@ export fn elf32_fsize(elf_type: c.Elf_Type, count: usize, version: c_uint) usize
 export fn elf32_getehdr(elf: ?*c.Elf) ?*c.Elf32_Ehdr {
     const e = Elf.cast(elf orelse return null);
 
-    if (e.kind != .ELF_K_ELF) {
+    if (e.kind != c.ELF_K_ELF) {
         seterrno(error.InvalidHandle);
         return null;
     } else if (e.is_64() or !(e.validEndianness() catch |err| {
@@ -391,6 +426,7 @@ export fn elf32_getehdr(elf: ?*c.Elf) ?*c.Elf32_Ehdr {
 /// header the information from the sh_info field in the zeroth section
 /// header is used.
 export fn elf32_getphdr(elf: ?*c.Elf) ?*c.Elf32_Phdr {
+    _ = elf;
     return null;
 }
 
@@ -401,28 +437,38 @@ export fn elf32_getshdr(scn: ?*c.Elf_Scn) ?*c.Elf32_Shdr {
 
 // Create ELF header if none exists
 export fn elf32_newehdr(elf: ?*c.Elf) ?*c.Elf32_Ehdr {
+    _ = elf;
     return null;
 }
 
 /// Create ELF program header
 export fn elf32_newphdr(elf: ?*c.Elf, cnt: usize) ?*c.Elf32_Phdr {
+    _ = elf;
+    _ = cnt;
     return null;
 }
 
 /// Convert data structure from to the representation in memory
 /// represented by ELF file representation
 export fn elf32_xlatetof(dest: ?*c.Elf_Data, src: ?*const c.Elf_Data, encode: c_uint) ?*c.Elf_Data {
+    _ = dest;
+    _ = src;
+    _ = encode;
     return null;
 }
 
 /// Convert data structure from the representation in the file represented
 /// by ELF to their memory representation
 export fn elf32_xlatetom(dest: ?*c.Elf_Data, src: ?*const c.Elf_Data, encode: c_uint) ?*c.Elf_Data {
+    _ = dest;
+    _ = src;
+    _ = encode;
     return null;
 }
 
 /// Compute simple checksum from permanent parts of the ELF file
 export fn elf64_checksum(elf: ?*c.Elf) c_long {
+    _ = elf;
     return -1;
 }
 
@@ -430,6 +476,9 @@ export fn elf64_checksum(elf: ?*c.Elf) c_long {
 /// in the external representation.  The binary class is taken from ELF.
 /// The result is based on version VERSION of the ELF standard.
 export fn elf64_fsize(elf_type: c.Elf_Type, count: usize, version: c_uint) usize {
+    _ = elf_type;
+    _ = count;
+    _ = version;
     return 0;
 }
 
@@ -437,7 +486,7 @@ export fn elf64_fsize(elf_type: c.Elf_Type, count: usize, version: c_uint) usize
 export fn elf64_getehdr(elf: ?*c.Elf) ?*c.Elf64_Ehdr {
     const e = Elf.cast(elf orelse return null);
 
-    if (e.kind != .ELF_K_ELF) {
+    if (e.kind != c.ELF_K_ELF) {
         seterrno(error.InvalidHandle);
         return null;
     } else if (!e.is_64() or !(e.validEndianness() catch |err| {
@@ -456,6 +505,7 @@ export fn elf64_getehdr(elf: ?*c.Elf) ?*c.Elf64_Ehdr {
 
 /// Retrieve class-dependent program header table
 export fn elf64_getphdr(elf: ?*c.Elf) ?*c.Elf64_Phdr {
+    _ = elf;
     return null;
 }
 
@@ -467,7 +517,7 @@ export fn elf64_getshdr(scn: ?*c.Elf_Scn) ?*c.Elf64_Shdr {
 /// Create ELF header if none exists
 export fn elf64_newehdr(elf: ?*c.Elf) ?*c.Elf64_Ehdr {
     const e = Elf.cast(elf orelse return null);
-    if (e.kind != .ELF_K_ELF) {
+    if (e.kind != c.ELF_K_ELF) {
         seterrno(error.InvalidHandle);
         return null;
     }
@@ -489,18 +539,26 @@ export fn elf64_newehdr(elf: ?*c.Elf) ?*c.Elf64_Ehdr {
 
 /// Create ELF program header
 export fn elf64_newphdr(elf: ?*c.Elf, cnt: usize) ?*c.Elf64_Phdr {
+    _ = elf;
+    _ = cnt;
     return null;
 }
 
 // Convert data structure from to the representation in memory
 // represented by ELF file representation
 export fn elf64_xlatetof(dest: ?*c.Elf_Data, src: ?*const c.Elf_Data, encode: c_uint) ?*c.Elf_Data {
+    _ = dest;
+    _ = src;
+    _ = encode;
     return null;
 }
 
 /// Convert data structure from the representation in the file represented
 /// by ELF to their memory representation
 export fn elf64_xlatetom(dest: ?*c.Elf_Data, src: ?*const c.Elf_Data, encode: c_uint) ?*c.Elf_Data {
+    _ = dest;
+    _ = src;
+    _ = encode;
     return null;
 }
 
@@ -514,11 +572,15 @@ export fn elf_begin(fd: c_int, cmd: c.Elf_Cmd, ref: ?*c.Elf) ?*c.Elf {
 
 /// Create a clone of an existing ELF descriptor
 export fn elf_clone(elf: ?*c.Elf, cmd: c.Elf_Cmd) ?*c.Elf {
+    _ = elf;
+    _ = cmd;
     return null;
 }
 
 // Control ELF descriptor
 export fn elf_cntl(elf: ?*c.Elf, cmd: c.Elf_Cmd) c_int {
+    _ = elf;
+    _ = cmd;
     return -1;
 }
 
@@ -604,48 +666,72 @@ export fn elf_errno() c_int {
 }
 
 /// Set fill bytes used to fill holes in data structures
-export fn elf_fill(fill: c_int) void {}
+export fn elf_fill(fill: c_int) void {
+    _ = fill;
+}
 
 /// Set or clear flags for ELF data
 export fn elf_flagdata(data: ?*c.Elf_Data, cmd: c.Elf_Cmd, flags: c_uint) c_uint {
+    _ = data;
+    _ = cmd;
+    _ = flags;
     return 0;
 }
 
 /// Set or clear flags for ELF header
 export fn elf_flagehdr(elf: ?*c.Elf, cmd: c.Elf_Cmd, flags: c_uint) c_uint {
+    _ = elf;
+    _ = cmd;
+    _ = flags;
     return 0;
 }
 
 /// Set or clear flags for ELF file
 export fn elf_flagelf(elf: ?*c.Elf, cmd: c.Elf_Cmd, flags: c_uint) c_uint {
+    _ = elf;
+    _ = cmd;
+    _ = flags;
     return 0;
 }
 
 /// Set or clear flags for ELF program header
 export fn elf_flagphdr(elf: ?*c.Elf, cmd: c.Elf_Cmd, flags: c_uint) c_uint {
+    _ = elf;
+    _ = cmd;
+    _ = flags;
     return 0;
 }
 
 /// Set or clear flags for ELF section
 export fn elf_flagscn(scn: ?*c.Elf_Scn, cmd: c.Elf_Cmd, flags: c_uint) c_uint {
+    _ = scn;
+    _ = cmd;
+    _ = flags;
     return 0;
 }
 
 /// Set or clear flags for ELF section header
 export fn elf_flagshdr(scn: ?*c.Elf_Scn, cmd: c.Elf_Cmd, flags: c_uint) c_uint {
+    _ = scn;
+    _ = cmd;
+    _ = flags;
     return 0;
 }
 
 /// Return header of archive
 export fn elf_getarhdr(elf: ?*c.Elf) ?*c.Elf_Arhdr {
+    _ = elf;
     return null;
 }
 
 export fn elf_getarsym(elf: ?*c.Elf, narsyms: *usize) ?*c.Elf_Arhdr {
+    _ = elf;
+    _ = narsyms;
     return null;
 }
 
 export fn elf_getbase(elf: ?*c.Elf) i64 {
+    _ = elf;
     return -1;
 }
 
@@ -655,6 +741,7 @@ export fn elf_getbase(elf: ?*c.Elf) i64 {
 /// the section contains compressed data then d_type is always set to
 /// ELF_T_CHDR.
 export fn elf_getdata(scn: ?*c.Elf_Scn, data: ?*c.Elf_Data) ?*c.Elf_Data {
+    log.debug("getdata: scn={*} data={*}", .{ scn, data });
     return if (scn == null)
         null
     else if (data == null)
@@ -669,11 +756,14 @@ export fn elf_getdata(scn: ?*c.Elf_Scn, data: ?*c.Elf_Data) ?*c.Elf_Data {
 }
 
 export fn elf_getident(elf: ?*c.Elf, nbytes: ?*usize) ?[*]u8 {
+    _ = elf;
+    _ = nbytes;
     return null;
 }
 
 /// Get section at INDEX.
 export fn elf_getscn(elf: ?*c.Elf, index: usize) ?*c.Elf_Scn {
+    log.debug("getscn: elf={*} index={}", .{ elf, index });
     const e = Elf.cast(elf orelse return null);
     return if (index < e.sections.len) blk: {
         var it = e.sections.first;
@@ -686,21 +776,27 @@ export fn elf_getscn(elf: ?*c.Elf, index: usize) ?*c.Elf_Scn {
 
 /// deprecated
 export fn elf_getshnum(elf: ?*c.Elf, dst: ?*usize) c_int {
+    _ = elf;
+    _ = dst;
     return -1;
 }
 
 /// deprecated
 export fn elf_getshstrndx(elf: ?*c.Elf, dst: ?*usize) c_int {
+    _ = elf;
+    _ = dst;
     return -1;
 }
 
 export fn elf_hash(string: [*:0]const u8) c_ulong {
+    _ = string;
     return 0;
 }
 
 /// Determine what kind of file is associated with ELF.
 export fn elf_kind(elf: ?*c.Elf) c.Elf_Kind {
-    return Elf.cast(elf orelse return .ELF_K_NONE).kind;
+    log.debug("getscn: elf={*}", .{elf});
+    return Elf.cast(elf orelse return c.ELF_K_NONE).kind;
 }
 
 /// Create descriptor for memory region.
@@ -751,7 +847,7 @@ export fn elf_newdata(scn: ?*c.Elf_Scn) ?*c.Elf_Data {
             .d = .{
                 .d_version = c.EV_CURRENT,
                 .d_buf = null,
-                .d_type = .ELF_T_BYTE,
+                .d_type = c.ELF_T_BYTE,
                 .d_size = 0,
                 .d_off = 0,
                 .d_align = 0,
@@ -807,39 +903,57 @@ export fn elf_newscn(elf: ?*c.Elf) ?*c.Elf_Scn {
 
 /// Advance archive descriptor to next element
 export fn elf_next(elf: ?*c.Elf) c.Elf_Cmd {
-    return .ELF_C_NULL;
+    _ = elf;
+    return c.ELF_C_NULL;
 }
 
 /// Get section with next section index.
 export fn elf_nextscn(elf: ?*c.Elf, scn: ?*c.Elf_Scn) ?*c.Elf_Scn {
     const e = Elf.cast(elf orelse return null);
-    const s = Scn.cast(scn orelse return null);
+    const s = Scn.cast(scn orelse return if (e.sections.first) |node| @ptrCast(*c.Elf_Scn, &node.data) else null);
     const node = @fieldParentPtr(SectionList.Node, "data", s);
 
     return if (node.next) |next| @ptrCast(*c.Elf_Scn, &next.data) else null;
 }
 
 export fn elf_rand(elf: ?*c.Elf, offset: usize) usize {
+    _ = elf;
+    _ = offset;
     return 0;
 }
 
 /// Get uninterpreted section content.
 export fn elf_rawdata(scn: ?*c.Elf_Scn, data: ?*c.Elf_Data) ?*c.Elf_Data {
-    const s = Scn.cast(scn orelse {
-        seterrno(error.InvalidHandle);
-        return null;
-    });
+    log.debug("rawdata: scn={*} data={*}", .{ scn, data });
+    //const s = Scn.cast(scn orelse {
+    //    seterrno(error.InvalidHandle);
+    //    return null;
+    //});
 
-    if (s.elf.kind != .ELF_K_ELF) {
-        seterrno(error.InvalidHandle);
-        return null;
-    }
+    //if (s.elf.kind != .ELF_K_ELF) {
+    //    seterrno(error.InvalidHandle);
+    //    return null;
+    //}
+
+    return if (scn == null)
+        null
+    else if (data == null)
+        if (Scn.cast(scn.?).data_list.first) |node| &node.data.d else null
+    else blk: {
+        var it = Scn.cast(scn.?).data_list.first;
+        break :blk while (it) |node| : (it = it.?.next) {
+            if (node.prev) |prev| if (&prev.data.d == data.?)
+                break &node.data.d;
+        } else null;
+    };
 
     // TODO
-    return null;
+    //return null;
 }
 
 export fn elf_rawfile(elf: ?*c.Elf, nbytes: *usize) ?[*]u8 {
+    _ = elf;
+    _ = nbytes;
     return null;
 }
 
@@ -850,6 +964,11 @@ export fn elf_strptr(elf: ?*c.Elf, index: usize, offset: usize) ?[*:0]const u8 {
     return while (it) |node| : (it = it.?.next) {
         if (node.data.index == index) {
             const scn = node.data;
+            if (offset >= scn.size()) {
+                seterrno(error.InvalidIndex);
+                return null;
+            }
+
             const data = e.memory[scn.offset() .. scn.offset() + scn.size()];
             const str = data[offset..];
 
@@ -867,7 +986,7 @@ export fn elf_strptr(elf: ?*c.Elf, index: usize, offset: usize) ?[*:0]const u8 {
 /// Update ELF descriptor and write file to disk
 export fn elf_update(elf: ?*c.Elf, cmd: c.Elf_Cmd) i64 {
     switch (cmd) {
-        .ELF_C_NULL, .ELF_C_WRITE, .ELF_C_WRITE_MMAP => {},
+        c.ELF_C_NULL, c.ELF_C_WRITE, c.ELF_C_WRITE_MMAP => {},
         else => {
             seterrno(error.InvalidCommand);
             return -1;
@@ -875,7 +994,7 @@ export fn elf_update(elf: ?*c.Elf, cmd: c.Elf_Cmd) i64 {
     }
 
     const e = Elf.cast(elf orelse return -1);
-    if (e.kind != .ELF_K_ELF) {
+    if (e.kind != c.ELF_K_ELF) {
         seterrno(error.InvalidHandle);
         return -1;
     }
@@ -886,7 +1005,6 @@ export fn elf_update(elf: ?*c.Elf, cmd: c.Elf_Cmd) i64 {
 
 /// Coordinate ELF library and application versions
 export fn elf_version(version: c_uint) c_uint {
-    std.debug.attachSegfaultHandler();
     return if (version == @as(c_uint, c.EV_NONE))
         c.EV_CURRENT
     else if (version == @as(c_uint, c.EV_CURRENT)) blk: {
@@ -900,6 +1018,7 @@ export fn elf_version(version: c_uint) c_uint {
 
 /// Compute simple checksum from permanent parts of the ELF file
 export fn gelf_checksum(elf: ?*c.Elf) c_long {
+    _ = elf;
     return -1;
 }
 
@@ -907,13 +1026,17 @@ export fn gelf_checksum(elf: ?*c.Elf) c_long {
 /// in the external representation.  The binary class is taken from ELF.
 /// The result is based on version VERSION of the ELF standard.
 export fn gelf_fsize(elf: ?*c.Elf, elf_type: c.Elf_Type, count: usize, version: c_uint) usize {
+    _ = elf;
+    _ = elf_type;
+    _ = count;
+    _ = version;
     return 0;
 }
 
 /// Get class of the file associated with ELF
 export fn gelf_getclass(elf: ?*c.Elf) c_int {
     const e = Elf.cast(elf orelse return c.ELFCLASSNONE);
-    return if (e.kind != .ELF_K_ELF)
+    return if (e.kind != c.ELF_K_ELF)
         c.ELFCLASSNONE
     else switch (e.state) {
         .elf32 => c.ELFCLASS32,
@@ -923,6 +1046,9 @@ export fn gelf_getclass(elf: ?*c.Elf) c_int {
 
 /// Get information from dynamic table at the given index
 export fn gelf_getdyn(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Dyn) ?*c.GElf_Dyn {
+    _ = data;
+    _ = ndx;
+    _ = dst;
     return null;
 }
 
@@ -932,7 +1058,7 @@ export fn gelf_getehdr(elf: ?*c.Elf, dst: ?*c.GElf_Ehdr) ?*c.GElf_Ehdr {
         return null;
 
     const e = Elf.cast(elf.?);
-    if (e.kind != .ELF_K_ELF) {
+    if (e.kind != c.ELF_K_ELF) {
         seterrno(error.InvalidHandle);
         return null;
     }
@@ -968,16 +1094,23 @@ export fn gelf_getehdr(elf: ?*c.Elf, dst: ?*c.GElf_Ehdr) ?*c.GElf_Ehdr {
 
 /// Get move structure at the given index
 export fn gelf_getmove(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Move) ?*c.GElf_Move {
+    _ = data;
+    _ = ndx;
+    _ = dst;
     return null;
 }
 
 /// Retrieve program header table entry
 export fn gelf_getphdr(elf: ?*c.Elf, ndr: c_int, dst: ?*c.GElf_Phdr) ?*c.GElf_Phdr {
+    _ = elf;
+    _ = ndr;
+    _ = dst;
     return null;
 }
 
 /// Retrieve REL relocation info at the given index.
 export fn gelf_getrel(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Rel) ?*c.GElf_Rel {
+    log.debug("getrel: data={*} ndx={} dst={}", .{ data, ndx, dst });
     const d = dst orelse return null;
     const data_scn = @fieldParentPtr(
         ScnData,
@@ -985,7 +1118,7 @@ export fn gelf_getrel(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Rel) ?*c.GEl
         @ptrCast(*c.Elf_Data, data orelse return null),
     );
 
-    if (data_scn.d.d_type != .ELF_T_REL) {
+    if (data_scn.d.d_type != c.ELF_T_REL) {
         seterrno(error.InvalidHandle);
         return null;
     }
@@ -1021,6 +1154,9 @@ export fn gelf_getrel(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Rel) ?*c.GEl
 
 /// Retrieve RELA relocation info at the given index
 export fn gelf_getrela(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Rela) ?*c.GElf_Rela {
+    _ = data;
+    _ = ndx;
+    _ = dst;
     return null;
 }
 
@@ -1053,10 +1189,14 @@ export fn gelf_getshdr(scn: ?*c.Elf_Scn, dst: ?*c.GElf_Shdr) ?*c.GElf_Shdr {
 
 /// Retrieve symbol information from the symbol table at the given index.
 export fn gelf_getsym(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Sym) ?*c.GElf_Sym {
-    const data_scn = @fieldParentPtr(ScnData, "d", data orelse return null);
-    const d = dst orelse return null;
+    const data_scn = @fieldParentPtr(ScnData, "d", data orelse {
+        return null;
+    });
+    const d = dst orelse {
+        return null;
+    };
 
-    if (data_scn.d.d_type != .ELF_T_SYM) {
+    if (data_scn.d.d_type != c.ELF_T_SYM) {
         seterrno(error.InvalidHandle);
         return null;
     }
@@ -1091,44 +1231,79 @@ export fn gelf_getsym(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Sym) ?*c.GEl
         d.* = syms[@intCast(usize, ndx)];
     }
 
+    {
+        const e = data_scn.s.elf;
+        var strndx: usize = 0;
+
+        const rc = elf_getshdrstrndx(@ptrCast(*c.Elf, e), &strndx);
+        if (rc != 0) @panic("no idea bruh");
+
+        const str = elf_strptr(@ptrCast(*c.Elf, e), strndx, d.st_name);
+        log.debug("gelf_getsym: {s}: {}", .{ str, d });
+        log.debug("data: {}", .{data_scn.d});
+    }
+
     return d;
 }
 
 /// Retrieve additional symbol information from the symbol table at the
 /// given index
 export fn gelf_getsyminfo(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Syminfo) ?*c.GElf_Syminfo {
+    _ = data;
+    _ = ndx;
+    _ = dst;
     return null;
 }
 
 /// Retrieve symbol information and separate section index from the
 /// symbol table at the given index
 export fn gelf_getsymshndx(symdata: ?*c.Elf_Data, shndxdata: ?*c.Elf_Data, ndx: c_int, sym: ?*c.GElf_Sym, xshndx: ?*c.Elf32_Word) ?*c.GElf_Sym {
+    _ = symdata;
+    _ = shndxdata;
+    _ = ndx;
+    _ = sym;
+    _ = xshndx;
     return null;
 }
 
 /// Retrieve additional symbol version definition information at given
 /// offset
 export fn gelf_getverdaux(data: ?*c.Elf_Data, offset: c_int, dst: ?*c.GElf_Verdef) ?*c.GElf_Verdef {
+    _ = data;
+    _ = offset;
+    _ = dst;
     return null;
 }
 
 /// Retrieve symbol version definition information at given offset
 export fn gelf_getverdef(data: ?*c.Elf_Data, offset: c_int, dsp: ?*c.GElf_Verdef) ?*c.GElf_Verdef {
+    _ = data;
+    _ = offset;
+    _ = dsp;
     return null;
 }
 
 /// Retrieve additional required symbol version information at given offset
 export fn gelf_getvernaux(data: ?*c.Elf_Data, offset: c_int, dst: ?*c.GElf_Vernaux) ?*c.GElf_Vernaux {
+    _ = data;
+    _ = offset;
+    _ = dst;
     return null;
 }
 
 /// Retrieve required symbol version information at given offset
 export fn gelf_getverneed(data: ?*c.Elf_Data, offset: c_int, dst: ?*c.GElf_Verneed) ?*c.GElf_Verneed {
+    _ = data;
+    _ = offset;
+    _ = dst;
     return null;
 }
 
 /// Retrieve symbol version information at given index
 export fn gelf_getversym(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Versym) ?*c.GElf_Versym {
+    _ = data;
+    _ = ndx;
+    _ = dst;
     return null;
 }
 
@@ -1136,6 +1311,8 @@ export fn gelf_getversym(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Versym) ?
 /// is ELFCLASS32 or an Elf64_Ehdr if CLASS is ELFCLASS64.  Returns NULL
 /// on error.
 export fn gelf_newehdr(elf: ?*c.Elf, class: c_int) ?*c_void {
+    _ = elf;
+    _ = class;
     return null;
 }
 
@@ -1143,165 +1320,252 @@ export fn gelf_newehdr(elf: ?*c.Elf, class: c_int) ?*c_void {
 /// Elf32_Phdr or an Elf64_Phdr depending on whether the given ELF is
 /// ELFCLASS32 or ELFCLASS64.  Returns NULL on error.
 export fn gelf_newphdr(elf: ?*c.Elf, cnt: usize) ?*c_void {
+    _ = elf;
+    _ = cnt;
     return null;
 }
 
 /// Update information in dynamic table at the given index
-export fn gelf_update_dyn(__dst: [*c]c.Elf_Data, __ndx: c_int, __src: [*c]c.GElf_Dyn) c_int {
+export fn gelf_update_dyn(dst: [*c]c.Elf_Data, ndx: c_int, src: [*c]c.GElf_Dyn) c_int {
+    _ = dst;
+    _ = ndx;
+    _ = src;
     return -1;
 }
 
 /// Update the ELF header
-export fn gelf_update_ehdr(__elf: ?*c.Elf, __src: [*c]c.GElf_Ehdr) c_int {
+export fn gelf_update_ehdr(elf: ?*c.Elf, src: [*c]c.GElf_Ehdr) c_int {
+    _ = elf;
+    _ = src;
     return -1;
 }
 
 /// Update move structure at the given index
-export fn gelf_update_move(__data: [*c]c.Elf_Data, __ndx: c_int, __src: [*c]c.GElf_Move) c_int {
+export fn gelf_update_move(data: [*c]c.Elf_Data, ndx: c_int, src: [*c]c.GElf_Move) c_int {
+    _ = data;
+    _ = ndx;
+    _ = src;
     return -1;
 }
 
 /// Update the program header
-export fn gelf_update_phdr(__elf: ?*c.Elf, __ndx: c_int, __src: [*c]c.GElf_Phdr) c_int {
+export fn gelf_update_phdr(elf: ?*c.Elf, ndx: c_int, src: [*c]c.GElf_Phdr) c_int {
+    _ = elf;
+    _ = ndx;
+    _ = src;
     return -1;
 }
 
 /// Update REL relocation information at given index
-export fn gelf_update_rel(__dst: [*c]c.Elf_Data, __ndx: c_int, __src: [*c]c.GElf_Rel) c_int {
+export fn gelf_update_rel(dst: [*c]c.Elf_Data, ndx: c_int, src: [*c]c.GElf_Rel) c_int {
+    _ = dst;
+    _ = ndx;
+    _ = src;
     return -1;
 }
 
 /// Update RELA relocation information at given index
-export fn gelf_update_rela(__dst: [*c]c.Elf_Data, __ndx: c_int, __src: [*c]c.GElf_Rela) c_int {
+export fn gelf_update_rela(dst: [*c]c.Elf_Data, ndx: c_int, src: [*c]c.GElf_Rela) c_int {
+    _ = dst;
+    _ = ndx;
+    _ = src;
     return -1;
 }
 
 /// Update section header
-export fn gelf_update_shdr(__scn: ?*c.Elf_Scn, __src: [*c]c.GElf_Shdr) c_int {
+export fn gelf_update_shdr(scn: ?*c.Elf_Scn, src: [*c]c.GElf_Shdr) c_int {
+    _ = scn;
+    _ = src;
     return -1;
 }
 
 /// Update symbol information in the symbol table at the given index
-export fn gelf_update_sym(__data: [*c]c.Elf_Data, __ndx: c_int, __src: [*c]c.GElf_Sym) c_int {
+export fn gelf_update_sym(data: [*c]c.Elf_Data, ndx: c_int, src: [*c]c.GElf_Sym) c_int {
+    _ = data;
+    _ = ndx;
+    _ = src;
     return -1;
 }
 
 /// Update additional symbol information in the symbol table at the
 /// given index
-export fn gelf_update_syminfo(__data: [*c]c.Elf_Data, __ndx: c_int, __src: [*c]c.GElf_Syminfo) c_int {
+export fn gelf_update_syminfo(data: [*c]c.Elf_Data, ndx: c_int, src: [*c]c.GElf_Syminfo) c_int {
+    _ = data;
+    _ = ndx;
+    _ = src;
     return -1;
 }
 
 /// Update symbol information and separate section index in the symbol
 /// table at the given index
-export fn gelf_update_symshndx(__symdata: [*c]c.Elf_Data, __shndxdata: [*c]c.Elf_Data, __ndx: c_int, __sym: [*c]c.GElf_Sym, __xshndx: c.Elf32_Word) c_int {
+export fn gelf_update_symshndx(symdata: [*c]c.Elf_Data, shndxdata: [*c]c.Elf_Data, ndx: c_int, sym: [*c]c.GElf_Sym, xshndx: c.Elf32_Word) c_int {
+    _ = symdata;
+    _ = shndxdata;
+    _ = ndx;
+    _ = sym;
+    _ = xshndx;
     return -1;
 }
 
 /// Update additional symbol version definition information
-export fn gelf_update_verdaux(__data: [*c]c.Elf_Data, __offset: c_int, __src: [*c]c.GElf_Verdaux) c_int {
+export fn gelf_update_verdaux(data: [*c]c.Elf_Data, offset: c_int, src: [*c]c.GElf_Verdaux) c_int {
+    _ = data;
+    _ = offset;
+    _ = src;
     return -1;
 }
 
 /// Update symbol version definition information
-export fn gelf_update_verdef(__data: [*c]c.Elf_Data, __offset: c_int, __src: [*c]c.GElf_Verdef) c_int {
+export fn gelf_update_verdef(data: [*c]c.Elf_Data, offset: c_int, src: [*c]c.GElf_Verdef) c_int {
+    _ = data;
+    _ = offset;
+    _ = src;
     return -1;
 }
 
 /// Update additional required symbol version information
-export fn gelf_update_vernaux(__data: [*c]c.Elf_Data, __offset: c_int, __src: [*c]c.GElf_Vernaux) c_int {
+export fn gelf_update_vernaux(data: [*c]c.Elf_Data, offset: c_int, src: [*c]c.GElf_Vernaux) c_int {
+    _ = data;
+    _ = offset;
+    _ = src;
     return -1;
 }
 
 /// Update required symbol version information
-export fn gelf_update_verneed(__data: [*c]c.Elf_Data, __offset: c_int, __src: [*c]c.GElf_Verneed) c_int {
+export fn gelf_update_verneed(data: [*c]c.Elf_Data, offset: c_int, src: [*c]c.GElf_Verneed) c_int {
+    _ = data;
+    _ = offset;
+    _ = src;
     return -1;
 }
 
 /// Update symbol version information
-export fn gelf_update_versym(__data: [*c]c.Elf_Data, __ndx: c_int, __src: [*c]c.GElf_Versym) c_int {
+export fn gelf_update_versym(data: [*c]c.Elf_Data, ndx: c_int, src: [*c]c.GElf_Versym) c_int {
+    _ = data;
+    _ = ndx;
+    _ = src;
     return -1;
 }
 
 /// Convert data structure from to the representation in memory
 /// represented by ELF file representation
 export fn gelf_xlatetof(elf: ?*c.Elf, dst: ?*c.Elf_Data, src: ?*const c.Elf_Data, encode: c_uint) ?*c.Elf_Data {
+    _ = elf;
+    _ = dst;
+    _ = src;
+    _ = encode;
     return null;
 }
 
 /// Convert data structure from the representation in the file represented
 /// by ELF to their memory representation
 export fn gelf_xlatetom(elf: ?*c.Elf, dst: ?*c.Elf_Data, src: ?*const c.Elf_Data, encode: c_uint) ?*c.Elf_Data {
+    _ = elf;
+    _ = dst;
+    _ = src;
+    _ = encode;
     return null;
 }
 
 /// Get specified entries from file
-export fn nlist(__filename: [*c]const u8, __nl: [*c]c.struct_nlist) c_int {
+export fn nlist(filename: [*c]const u8, nl: [*c]c.struct_nlist) c_int {
+    _ = filename;
+    _ = nl;
     return -1;
 }
 
 /// Get library from table at the given index
-export fn gelf_getlib(__data: [*c]c.Elf_Data, __ndx: c_int, __dst: [*c]c.GElf_Lib) [*c]c.GElf_Lib {
+export fn gelf_getlib(data: [*c]c.Elf_Data, ndx: c_int, dst: [*c]c.GElf_Lib) [*c]c.GElf_Lib {
+    _ = data;
+    _ = ndx;
+    _ = dst;
     return null;
 }
 
 /// Update library in table at the given index
-export fn gelf_update_lib(__data: [*c]c.Elf_Data, __ndx: c_int, __src: [*c]c.GElf_Lib) c_int {
+export fn gelf_update_lib(data: [*c]c.Elf_Data, ndx: c_int, src: [*c]c.GElf_Lib) c_int {
+    _ = data;
+    _ = ndx;
+    _ = src;
     return -1;
 }
 
 /// Get section at OFFSET
-export fn elf32_offscn(__elf: ?*c.Elf, __offset: c.Elf32_Off) ?*c.Elf_Scn {
+export fn elf32_offscn(elf: ?*c.Elf, offset: c.Elf32_Off) ?*c.Elf_Scn {
+    _ = elf;
+    _ = offset;
     return null;
 }
 
 /// Get section at OFFSET
-export fn elf64_offscn(__elf: ?*c.Elf, __offset: c.Elf64_Off) ?*c.Elf_Scn {
+export fn elf64_offscn(elf: ?*c.Elf, offset: c.Elf64_Off) ?*c.Elf_Scn {
+    _ = elf;
+    _ = offset;
     return null;
 }
 
 /// Get section at OFFSET
-export fn gelf_offscn(__elf: ?*c.Elf, __offset: c.GElf_Off) ?*c.Elf_Scn {
+export fn gelf_offscn(elf: ?*c.Elf, offset: c.GElf_Off) ?*c.Elf_Scn {
+    _ = elf;
+    _ = offset;
     return null;
 }
 
 /// Return offset in archive for current file ELF
-export fn elf_getaroff(__elf: ?*c.Elf) i64 {
+export fn elf_getaroff(elf: ?*c.Elf) i64 {
+    _ = elf;
     return -1;
 }
 
 /// Compute hash value using the GNU-specific hash function
-export fn elf_gnu_hash(__string: [*c]const u8) c_ulong {
+export fn elf_gnu_hash(string: [*c]const u8) c_ulong {
+    _ = string;
     return 0;
 }
 
 /// Get data translated from a chunk of the file contents as section data
 /// would be for TYPE.  The resulting Elf_Data pointer is valid until
 /// elf_end (ELF) is called.
-export fn elf_getdata_rawchunk(__elf: ?*c.Elf, __offset: i64, __size: usize, __type: c.Elf_Type) [*c]c.Elf_Data {
+export fn elf_getdata_rawchunk(elf: ?*c.Elf, offset: i64, size: usize, typ: c.Elf_Type) [*c]c.Elf_Data {
+    _ = elf;
+    _ = offset;
+    _ = size;
+    _ = typ;
     return null;
 }
 
 /// Get auxv entry at the given index
-export fn gelf_getauxv(__data: [*c]c.Elf_Data, __ndx: c_int, __dst: [*c]c.GElf_auxv_t) [*c]c.GElf_auxv_t {
+export fn gelf_getauxv(data: [*c]c.Elf_Data, ndx: c_int, dst: [*c]c.GElf_auxv_t) [*c]c.GElf_auxv_t {
+    _ = data;
+    _ = ndx;
+    _ = dst;
     return null;
 }
 
 /// Update auxv entry at the given index
-export fn gelf_update_auxv(__data: [*c]c.Elf_Data, __ndx: c_int, __src: [*c]c.GElf_auxv_t) c_int {
+export fn gelf_update_auxv(data: [*c]c.Elf_Data, ndx: c_int, src: [*c]c.GElf_auxv_t) c_int {
+    _ = data;
+    _ = ndx;
+    _ = src;
     return -1;
 }
 
 /// Get note header at the given offset into the data, and the offsets of
 /// the note's name and descriptor data.  Returns the offset of the next
 /// note header, or 0 for an invalid offset or corrupt note header.
-export fn gelf_getnote(__data: [*c]c.Elf_Data, __offset: usize, __result: [*c]c.GElf_Nhdr, __name_offset: [*c]usize, __desc_offset: [*c]usize) usize {
+export fn gelf_getnote(data: [*c]c.Elf_Data, offset: usize, result: [*c]c.GElf_Nhdr, name_offset: [*c]usize, desc_offset: [*c]usize) usize {
+    _ = data;
+    _ = offset;
+    _ = result;
+    _ = name_offset;
+    _ = desc_offset;
     return 0;
 }
 
 /// Get the section index of the extended section index table for the
 /// given symbol table
-export fn elf_scnshndx(__scn: ?*c.Elf_Scn) c_int {
+export fn elf_scnshndx(scn: ?*c.Elf_Scn) c_int {
+    _ = scn;
     return -1;
 }
 
@@ -1341,27 +1605,33 @@ export fn elf_getshdrstrndx(elf: ?*c.Elf, dst: ?*usize) c_int {
 /// more headers than can be represented in the e_phnum field of the ELF
 /// header the information from the sh_info field in the zeroth section
 /// header is used.
-export fn elf_getphdrnum(__elf: ?*c.Elf, __dst: [*c]usize) c_int {
+export fn elf_getphdrnum(elf: ?*c.Elf, dst: [*c]usize) c_int {
+    _ = elf;
+    _ = dst;
     return -1;
 }
 
 /// Returns compression header for a section if section data is
 /// compressed.  Returns NULL and sets elf_errno if the section isn't
 /// compressed or an error occurred.
-export fn elf32_getchdr(__scn: ?*c.Elf_Scn) [*c]c.Elf32_Chdr {
+export fn elf32_getchdr(scn: ?*c.Elf_Scn) [*c]c.Elf32_Chdr {
+    _ = scn;
     return null;
 }
 
 /// Returns compression header for a section if section data is
 /// compressed.  Returns NULL and sets elf_errno if the section isn't
 /// compressed or an error occurred.
-export fn elf64_getchdr(__scn: ?*c.Elf_Scn) [*c]c.Elf64_Chdr {
+export fn elf64_getchdr(scn: ?*c.Elf_Scn) [*c]c.Elf64_Chdr {
+    _ = scn;
     return null;
 }
 
 /// Get compression header of section if any.  Returns NULL and sets
 /// elf_errno if the section isn't compressed or an error occurred.
-export fn gelf_getchdr(__scn: ?*c.Elf_Scn, __dst: [*c]c.GElf_Chdr) [*c]c.GElf_Chdr {
+export fn gelf_getchdr(scn: ?*c.Elf_Scn, dst: [*c]c.GElf_Chdr) [*c]c.GElf_Chdr {
+    _ = scn;
+    _ = dst;
     return null;
 }
 
@@ -1419,6 +1689,9 @@ export fn gelf_getchdr(__scn: ?*c.Elf_Scn, __dst: [*c]c.GElf_Chdr) [*c]c.GElf_Ch
 /// doesn't mark the section as dirty.  To keep the changes when
 /// calling elf_update the section has to be flagged ELF_F_DIRTY.  */
 export fn elf_compress(scn: ?*c.Elf_Scn, typ: c_int, flags: c_uint) c_int {
+    _ = scn;
+    _ = typ;
+    _ = flags;
     return -1;
 }
 
@@ -1476,5 +1749,8 @@ export fn elf_compress(scn: ?*c.Elf_Scn, typ: c_int, flags: c_uint) c_int {
 /// doesn't mark the section as dirty.  To keep the changes when
 /// calling elf_update the section has to be flagged ELF_F_DIRTY.  */
 export fn elf_compress_gnu(scn: ?*c.Elf_Scn, compress: c_int, flags: c_uint) c_int {
+    _ = scn;
+    _ = compress;
+    _ = flags;
     return -1;
 }
