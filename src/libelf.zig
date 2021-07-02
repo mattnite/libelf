@@ -741,7 +741,6 @@ export fn elf_getbase(elf: ?*c.Elf) i64 {
 /// the section contains compressed data then d_type is always set to
 /// ELF_T_CHDR.
 export fn elf_getdata(scn: ?*c.Elf_Scn, data: ?*c.Elf_Data) ?*c.Elf_Data {
-    log.debug("getdata: scn={*} data={*}", .{ scn, data });
     return if (scn == null)
         null
     else if (data == null)
@@ -763,13 +762,12 @@ export fn elf_getident(elf: ?*c.Elf, nbytes: ?*usize) ?[*]u8 {
 
 /// Get section at INDEX.
 export fn elf_getscn(elf: ?*c.Elf, index: usize) ?*c.Elf_Scn {
-    log.debug("getscn: elf={*} index={}", .{ elf, index });
     const e = Elf.cast(elf orelse return null);
     return if (index < e.sections.len) blk: {
         var it = e.sections.first;
         break :blk @ptrCast(*c.Elf_Scn, while (it) |node| : (it = it.?.next) {
             if (node.data.index == index)
-                break node;
+                break &node.data;
         } else return null);
     } else null;
 }
@@ -795,7 +793,6 @@ export fn elf_hash(string: [*:0]const u8) c_ulong {
 
 /// Determine what kind of file is associated with ELF.
 export fn elf_kind(elf: ?*c.Elf) c.Elf_Kind {
-    log.debug("getscn: elf={*}", .{elf});
     return Elf.cast(elf orelse return c.ELF_K_NONE).kind;
 }
 
@@ -910,7 +907,7 @@ export fn elf_next(elf: ?*c.Elf) c.Elf_Cmd {
 /// Get section with next section index.
 export fn elf_nextscn(elf: ?*c.Elf, scn: ?*c.Elf_Scn) ?*c.Elf_Scn {
     const e = Elf.cast(elf orelse return null);
-    const s = Scn.cast(scn orelse return if (e.sections.first) |node| @ptrCast(*c.Elf_Scn, &node.data) else null);
+    const s = Scn.cast(scn orelse return if (e.sections.first) |first| if (first.next) |node| @ptrCast(*c.Elf_Scn, &node.data) else null else null);
     const node = @fieldParentPtr(SectionList.Node, "data", s);
 
     return if (node.next) |next| @ptrCast(*c.Elf_Scn, &next.data) else null;
@@ -924,7 +921,6 @@ export fn elf_rand(elf: ?*c.Elf, offset: usize) usize {
 
 /// Get uninterpreted section content.
 export fn elf_rawdata(scn: ?*c.Elf_Scn, data: ?*c.Elf_Data) ?*c.Elf_Data {
-    log.debug("rawdata: scn={*} data={*}", .{ scn, data });
     //const s = Scn.cast(scn orelse {
     //    seterrno(error.InvalidHandle);
     //    return null;
@@ -1110,7 +1106,6 @@ export fn gelf_getphdr(elf: ?*c.Elf, ndr: c_int, dst: ?*c.GElf_Phdr) ?*c.GElf_Ph
 
 /// Retrieve REL relocation info at the given index.
 export fn gelf_getrel(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Rel) ?*c.GElf_Rel {
-    log.debug("getrel: data={*} ndx={} dst={}", .{ data, ndx, dst });
     const d = dst orelse return null;
     const data_scn = @fieldParentPtr(
         ScnData,
@@ -1237,10 +1232,6 @@ export fn gelf_getsym(data: ?*c.Elf_Data, ndx: c_int, dst: ?*c.GElf_Sym) ?*c.GEl
 
         const rc = elf_getshdrstrndx(@ptrCast(*c.Elf, e), &strndx);
         if (rc != 0) @panic("no idea bruh");
-
-        const str = elf_strptr(@ptrCast(*c.Elf, e), strndx, d.st_name);
-        log.debug("gelf_getsym: {s}: {}", .{ str, d });
-        log.debug("data: {}", .{data_scn.d});
     }
 
     return d;
