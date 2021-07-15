@@ -1,0 +1,4 @@
+pkgs:
+  libelf:
+    version: 0.0.0
+    root: libelf.zig
