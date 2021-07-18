@@ -1,18 +1,14 @@
 const std = @import("std");
+const libelf = @import("./libelf.zig");
 
 pub fn build(b: *std.build.Builder) void {
     const mode = b.standardReleaseOptions();
     const target = b.standardTargetOptions(.{});
 
-    const static = b.addStaticLibrary("elf", "src/libelf.zig");
-    static.setBuildMode(mode);
-    static.setTarget(target);
-    static.addIncludeDir("include");
-    static.bundle_compiler_rt = true;
-    static.linkLibC();
+    const static = libelf.addStaticLibrary(b, target, mode);
     static.install();
 
-    const shared = b.addSharedLibrary("elf", "src/libelf.zig", .{
+    const shared = b.addSharedLibrary("elf", "src/main.zig", .{
         .versioned = .{
             .major = 1,
             .minor = 6,
