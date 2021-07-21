@@ -5,8 +5,6 @@ const c = @cImport({
     @cInclude("nlist.h");
 });
 
-const log = std.log.scoped(.libelf);
-
 const Allocator = std.mem.Allocator;
 const SectionList = std.TailQueue(Scn);
 const DataList = std.TailQueue(ScnData);
@@ -76,7 +74,6 @@ pub const Error = error{
 };
 
 fn seterrno(err: Error) void {
-    log.debug("setting errno to {s}", .{@errorName(err)});
     global_error = @errorToInt(err);
 }
 
@@ -99,7 +96,6 @@ const Scn = struct {
     };
 
     fn init(elf: *Elf, self: *Scn, state: State, index: usize) !Scn {
-        log.debug("scn: {}", .{state});
         return Scn{
             .elf = elf,
             .state = state,
