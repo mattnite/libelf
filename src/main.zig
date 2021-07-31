@@ -128,11 +128,24 @@ const Scn = struct {
                     const node = try allocator.create(DataList.Node);
                     errdefer allocator.destroy(node);
 
+                    const addr: usize = @ptrToInt(elf.memory.ptr) + e.shdr.sh_offset;
+                    const d_buf: usize = if (index > 0) addr_blk: {
+                        if (std.mem.isAligned(addr, @sizeOf(usize)))
+                            break :addr_blk addr;
+
+                        var slice: []u8 = undefined;
+                        slice.ptr = @intToPtr([*]u8, addr);
+                        slice.len = e.shdr.sh_size;
+
+                        const data_copy = try elf.arena.allocator.dupe(u8, slice);
+                        break :addr_blk @ptrToInt(data_copy.ptr);
+                    } else addr;
+
                     node.* = .{
                         .data = .{
                             .s = self,
                             .d = .{
-                                .d_buf = @intToPtr(?*c_void, @ptrToInt(elf.memory.ptr) + e.shdr.sh_offset),
+                                .d_buf = @intToPtr(?*c_void, d_buf),
                                 .d_type = shdrTypeToDataType(e.shdr.sh_type),
                                 .d_version = global_version,
                                 .d_size = e.shdr.sh_size,
